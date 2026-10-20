@@ -9,6 +9,7 @@ import {
   Tag,
   CheckCircle2,
   Clock,
+  Paperclip,
   Sparkles,
   Users,
   Search,
@@ -32,6 +33,7 @@ interface KanbanTask {
   assignee: string;
   dueDate: string;
   dueDateValue?: string;
+  attachmentsCount: number;
 }
 
 const COLUMNS: Array<{ id: KanbanTask['status']; label: string; color: string }> = [
@@ -41,7 +43,7 @@ const COLUMNS: Array<{ id: KanbanTask['status']; label: string; color: string }>
   { id: 'DONE', label: 'Hoàn thành (Done)', color: 'border-emerald-500' },
 ];
 
-const toKanbanTask = (task: Task): KanbanTask => ({
+const toKanbanTask = (task: Task, previous?: KanbanTask): KanbanTask => ({
   id: task.id,
   title: task.title,
   description: task.description || '',
@@ -51,6 +53,7 @@ const toKanbanTask = (task: Task): KanbanTask => ({
   assignee: task.assignee?.name || 'Chưa giao',
   dueDate: task.dueDate ? new Date(task.dueDate).toLocaleDateString('vi-VN') : 'Chưa đặt hạn',
   dueDateValue: task.dueDate,
+  attachmentsCount: task._count?.attachments ?? task.attachments?.length ?? previous?.attachmentsCount ?? 0,
 });
 
 export const KanbanPage: React.FC = () => {
@@ -107,7 +110,7 @@ export const KanbanPage: React.FC = () => {
     taskService
       .getTasksByProject(projectId)
       .then((projectTasks) => {
-        if (active) setTasks(projectTasks.map(toKanbanTask));
+        if (active) setTasks(projectTasks.map((task) => toKanbanTask(task)));
       })
       .catch((error: unknown) => {
         if (active) {
@@ -128,15 +131,24 @@ export const KanbanPage: React.FC = () => {
     }
 
     if (socket) {
-      const handleTaskUpdated = (updatedTask: Task) => {
+      const handleTaskUpdated = (event: { projectId: string; task: Task }) => {
+        if (event.projectId !== projectId) return;
         setTasks((prev) =>
-          prev.map((t) => (t.id === updatedTask.id ? toKanbanTask(updatedTask) : t))
+          prev.map((task) => task.id === event.task.id ? toKanbanTask(event.task, task) : task)
         );
-        toast.info(`Nhiệm vụ "${updatedTask.title}" vừa được cập nhật thời gian thực!`);
       };
 
-      const handleTaskStatusChanged = (event: { task: Task }) => {
-        handleTaskUpdated(event.task);
+      const handleAttachmentUpdated = (event: {
+        projectId: string;
+        taskId: string;
+        attachmentCount: number;
+      }) => {
+        if (event.projectId !== projectId) return;
+        setTasks((prev) =>
+          prev.map((task) => task.id === event.taskId
+            ? { ...task, attachmentsCount: event.attachmentCount }
+            : task)
+        );
       };
 
       const handleTaskCreated = (task: Task) => {
@@ -151,13 +163,13 @@ export const KanbanPage: React.FC = () => {
         setTasks((prev) => prev.filter((task) => task.id !== event.taskId));
       };
 
-      socket.on('task:updated', handleTaskUpdated);
-      socket.on('task:status_changed', handleTaskStatusChanged);
+      socket.on('task_updated', handleTaskUpdated);
+      socket.on('attachment_updated', handleAttachmentUpdated);
       socket.on('task:created', handleTaskCreated);
       socket.on('task:deleted', handleTaskDeleted);
       return () => {
-        socket.off('task:updated', handleTaskUpdated);
-        socket.off('task:status_changed', handleTaskStatusChanged);
+        socket.off('task_updated', handleTaskUpdated);
+        socket.off('attachment_updated', handleAttachmentUpdated);
         socket.off('task:created', handleTaskCreated);
         socket.off('task:deleted', handleTaskDeleted);
         if (projectId) {
@@ -176,6 +188,14 @@ export const KanbanPage: React.FC = () => {
       setTasks((prev) =>
         prev.map((task) => (task.id === taskId ? toKanbanTask(updatedTask) : task))
       );
+      if (projectId && socket?.connected) {
+        socket.emit('task_moved', {
+          projectId,
+          taskId,
+          status: updatedTask.status,
+          position: updatedTask.position,
+        });
+      }
 
       if (targetStatus === 'DONE') {
         confetti({ particleCount: 80, spread: 60, origin: { y: 0.6 } });
@@ -363,6 +383,11 @@ export const KanbanPage: React.FC = () => {
                       <span className="flex items-center gap-1">
                         <Users className="h-3 w-3" /> {task.assignee}
                       </span>
+                      {task.attachmentsCount > 0 && (
+                        <span className="flex items-center gap-1" title={`${task.attachmentsCount} tệp đính kèm`}>
+                          <Paperclip className="h-3 w-3" /> {task.attachmentsCount}
+                        </span>
+                      )}
                       <span className={`flex items-center gap-1 ${
                         task.dueDateValue && new Date(task.dueDateValue) < new Date() && task.status !== 'DONE'
                           ? 'font-semibold text-rose-600 dark:text-rose-400'

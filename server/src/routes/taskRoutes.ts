@@ -12,9 +12,14 @@ import {
   createSubTask,
   updateSubTask,
   deleteSubTask,
+  uploadTaskAttachment,
+  deleteTaskAttachment,
+  authorizeTaskAttachmentAccess,
+  getTaskAttachmentContent,
 } from '../controllers/taskController';
 import { searchTasksNL } from '../controllers/aiController';
 import { authenticateToken } from '../middlewares/authMiddleware';
+import { uploadTaskFiles } from '../config/upload';
 
 const router = express.Router();
 
@@ -33,11 +38,21 @@ router.put('/:id', updateTask);
 router.put('/:id/status', updateTaskStatus);
 router.delete('/:id', deleteTask);
 
-// 3. Bình luận (Comments)
+// 3. Tài liệu đính kèm
+router.post(
+  '/:id/attachments',
+  authorizeTaskAttachmentAccess,
+  uploadTaskFiles,
+  uploadTaskAttachment
+);
+router.get('/:id/attachments/:attachmentId/content', getTaskAttachmentContent);
+router.delete('/:id/attachments/:attachmentId', deleteTaskAttachment);
+
+// 4. Bình luận (Comments)
 router.post('/:id/comments', addComment);
 router.get('/:id/comments', getComments);
 
-// 4. Công việc con (Sub-tasks)
+// 5. Công việc con (Sub-tasks)
 router.post('/:id/subtasks', createSubTask);
 router.put('/subtasks/:subTaskId', updateSubTask);
 router.delete('/subtasks/:subTaskId', deleteSubTask);

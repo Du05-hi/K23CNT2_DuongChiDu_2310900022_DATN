@@ -1,4 +1,6 @@
-import { Response } from 'express';
+import fs from 'fs';
+import path from 'path';
+import { NextFunction, Response } from 'express';
 import { prisma } from '../config/prisma';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 import { logActivity } from '../services/activityLogService';
@@ -193,7 +195,7 @@ export const getTasksByProject = async (req: AuthenticatedRequest, res: Response
           select: { id: true, title: true, isCompleted: true },
         },
         _count: {
-          select: { comments: true, subTasks: true },
+          select: { comments: true, subTasks: true, attachments: true },
         },
       },
       orderBy: {
@@ -235,15 +237,115 @@ export const getMyTasks = async (req: AuthenticatedRequest, res: Response): Prom
       return;
     }
 
-    const tasks = await prisma.task.findMany({
-      where: { assigneeId: userId },
-      include: {
-        project: { select: { id: true, name: true } },
-      },
-      orderBy: [{ dueDate: 'asc' }, { updatedAt: 'desc' }],
+    const now = new Date();
+    const [tasks, kpiLogs] = await Promise.all([
+      prisma.task.findMany({
+        where: { assigneeId: userId },
+        include: {
+          project: {
+            select: {
+              id: true,
+              name: true,
+              status: true,
+              description: true,
+              startDate: true,
+              endDate: true,
+            },
+          },
+          assignee: {
+            select: { id: true, name: true, email: true, avatar: true },
+          },
+          creator: {
+            select: { id: true, name: true, email: true, avatar: true },
+          },
+          subTasks: {
+            orderBy: { createdAt: 'asc' },
+          },
+          attachments: {
+            orderBy: { createdAt: 'desc' },
+          },
+          _count: {
+            select: {
+              attachments: true,
+              subTasks: true,
+              comments: true,
+            },
+          },
+        },
+        orderBy: [{ dueDate: 'asc' }, { updatedAt: 'desc' }],
+      }),
+      prisma.kpiLog.findMany({
+        where: { userId },
+        orderBy: { period: 'asc' },
+        take: 6,
+        select: {
+          period: true,
+          totalScore: true,
+          rank: true,
+          tasksCompleted: true,
+          tasksOnTime: true,
+        },
+      }),
+    ]);
+
+    const statusSummary = {
+      TODO: 0,
+      IN_PROGRESS: 0,
+      REVIEW: 0,
+      DONE: 0,
+      overdue: 0,
+      upcomingWithin48h: 0,
+      total: tasks.length,
+    };
+
+    const normalizedTasks = tasks.map((task) => {
+      const completedSubTasks = task.subTasks.filter((subTask) => subTask.isCompleted).length;
+      const progress = task.subTasks.length > 0
+        ? Math.round((completedSubTasks / task.subTasks.length) * 100)
+        : task.status === 'DONE'
+          ? 100
+          : 0;
+
+      const dueDate = task.dueDate ? new Date(task.dueDate) : null;
+      const isOverdue = task.status !== 'DONE' && dueDate && dueDate < now;
+      const timeUntilDueHours = dueDate ? (dueDate.getTime() - now.getTime()) / 3600000 : null;
+      const isUpcomingDeadline = task.status !== 'DONE' && dueDate && timeUntilDueHours !== null && timeUntilDueHours <= 48 && timeUntilDueHours >= 0;
+
+      if (task.status === 'TODO') statusSummary.TODO += 1;
+      if (task.status === 'IN_PROGRESS') statusSummary.IN_PROGRESS += 1;
+      if (task.status === 'REVIEW') statusSummary.REVIEW += 1;
+      if (task.status === 'DONE') statusSummary.DONE += 1;
+      if (isOverdue) statusSummary.overdue += 1;
+      if (isUpcomingDeadline) statusSummary.upcomingWithin48h += 1;
+
+      return {
+        ...task,
+        dueDate: dueDate ? dueDate.toISOString() : null,
+        progress,
+        isOverdue,
+        isUpcomingDeadline,
+        attachmentsCount: task._count.attachments,
+        subtaskCount: task._count.subTasks,
+        completedSubtaskCount: completedSubTasks,
+        hoursUntilDue: timeUntilDueHours,
+      };
     });
 
-    res.status(200).json({ success: true, data: tasks });
+    const currentMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+    const currentMonthKpi = kpiLogs.find((entry) => entry.period === currentMonth) ?? kpiLogs[kpiLogs.length - 1] ?? null;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        summary: statusSummary,
+        tasks: normalizedTasks,
+        kpiHistory: kpiLogs,
+        monthlyKpi: currentMonthKpi,
+        upcomingDeadlines: normalizedTasks
+          .filter((task) => task.isUpcomingDeadline)
+          .sort((a, b) => (a.hoursUntilDue ?? Number.MAX_SAFE_INTEGER) - (b.hoursUntilDue ?? Number.MAX_SAFE_INTEGER)),
+      },
+    });
   } catch (error: any) {
     console.error('Lỗi getMyTasks:', error);
     res.status(500).json({
@@ -284,6 +386,9 @@ export const getTaskById = async (req: AuthenticatedRequest, res: Response): Pro
           },
           orderBy: { createdAt: 'asc' },
         },
+        attachments: {
+          orderBy: { createdAt: 'desc' },
+        },
       },
     });
 
@@ -305,6 +410,274 @@ export const getTaskById = async (req: AuthenticatedRequest, res: Response): Pro
     res.status(500).json({
       success: false,
       message: 'Lỗi máy chủ khi lấy chi tiết công việc.',
+      error: error.message,
+    });
+  }
+};
+
+export const authorizeTaskAttachmentAccess = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const task = await prisma.task.findUnique({
+      where: { id: req.params.id },
+      select: { projectId: true },
+    });
+
+    if (!task) {
+      res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
+      return;
+    }
+    if (!req.user || !(await canAccessProject(req.user, task.projectId))) {
+      res.status(403).json({ success: false, message: 'Bạn không có quyền đính kèm file vào task này.' });
+      return;
+    }
+
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const uploadTaskAttachment = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id: taskId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
+
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      select: { id: true, projectId: true, title: true },
+    });
+
+    if (!task) {
+      res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
+      return;
+    }
+
+    if (!req.user || !(await canAccessProject(req.user, task.projectId))) {
+      res.status(403).json({ success: false, message: 'Bạn không có quyền đính kèm file vào task này.' });
+      return;
+    }
+
+    const uploadedFiles = req.files as Express.Multer.File[] | undefined;
+    if (!uploadedFiles || uploadedFiles.length === 0) {
+      res.status(400).json({ success: false, message: 'Bạn chưa chọn file để upload.' });
+      return;
+    }
+
+    let attachments;
+    try {
+      attachments = await prisma.$transaction(
+        uploadedFiles.map((file) => {
+          const fileUrl = `/uploads/tasks/${path.basename(file.path)}`;
+
+          return prisma.taskAttachment.create({
+            data: {
+              taskId,
+              fileName: file.originalname,
+              fileUrl,
+              fileType: file.mimetype || 'application/octet-stream',
+              fileSize: file.size,
+              uploadedById: userId,
+            },
+          });
+        })
+      );
+    } catch (error) {
+      const cleanupResults = await Promise.allSettled(
+        uploadedFiles.map((file) => fs.promises.unlink(file.path))
+      );
+      cleanupResults.forEach((result) => {
+        if (result.status === 'rejected' && (result.reason as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.error('Không thể dọn file upload sau khi lưu metadata thất bại:', result.reason);
+        }
+      });
+      throw error;
+    }
+
+    let activityLogWarning = false;
+    try {
+      await logActivity({
+        userId,
+        action: 'TASK_ATTACHMENT_ADDED',
+        entityType: 'TASK_ATTACHMENT',
+        entityId: taskId,
+        description: `Đính kèm ${attachments.length} file vào task "${task.title}"`,
+        metadata: { taskId, projectId: task.projectId, attachmentCount: attachments.length },
+      });
+    } catch (error) {
+      activityLogWarning = true;
+      console.error('File đã được lưu nhưng không thể ghi activity log:', error);
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      const attachmentCount = await prisma.taskAttachment.count({ where: { taskId } });
+      io.to(`project:${task.projectId}`).emit('attachment_updated', {
+        projectId: task.projectId,
+        taskId,
+        action: 'added',
+        attachments,
+        attachmentCount,
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: activityLogWarning
+        ? 'Đã tải file lên nhưng chưa thể ghi nhật ký hoạt động.'
+        : 'Upload file thành công!',
+      data: attachments,
+      ...(activityLogWarning ? { activityLogWarning: true } : {}),
+    });
+  } catch (error: any) {
+    console.error('Lỗi uploadTaskAttachment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi upload file đính kèm.',
+      error: error.message,
+    });
+  }
+};
+
+export const deleteTaskAttachment = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id: taskId, attachmentId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
+
+    const attachment = await prisma.taskAttachment.findUnique({
+      where: { id: attachmentId },
+      include: { task: { select: { projectId: true, title: true } } },
+    });
+
+    if (!attachment) {
+      res.status(404).json({ success: false, message: 'File đính kèm không tồn tại.' });
+      return;
+    }
+
+    if (attachment.taskId !== taskId) {
+      res.status(400).json({ success: false, message: 'File không thuộc task này.' });
+      return;
+    }
+
+    if (!req.user || !(await canAccessProject(req.user, attachment.task.projectId))) {
+      res.status(403).json({ success: false, message: 'Bạn không có quyền xóa file đính kèm này.' });
+      return;
+    }
+
+    await prisma.taskAttachment.delete({ where: { id: attachmentId } });
+
+    let cleanupWarning = false;
+    const filePathOnDisk = path.join(__dirname, '../../uploads/tasks', path.basename(attachment.fileUrl));
+    try {
+      await fs.promises.unlink(filePathOnDisk);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        cleanupWarning = true;
+        console.error('Không thể dọn file đính kèm sau khi xóa metadata:', error);
+      }
+    }
+
+    let activityLogWarning = false;
+    try {
+      await logActivity({
+        userId,
+        action: 'TASK_ATTACHMENT_REMOVED',
+        entityType: 'TASK_ATTACHMENT',
+        entityId: attachmentId,
+        description: `Xóa file "${attachment.fileName}" khỏi task "${attachment.task.title}"`,
+        metadata: { taskId, projectId: attachment.task.projectId },
+      });
+    } catch (error) {
+      activityLogWarning = true;
+      console.error('Đã xóa file nhưng không thể ghi activity log:', error);
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      const attachmentCount = await prisma.taskAttachment.count({ where: { taskId } });
+      io.to(`project:${attachment.task.projectId}`).emit('attachment_updated', {
+        projectId: attachment.task.projectId,
+        taskId,
+        action: 'removed',
+        attachmentId,
+        attachmentCount,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: cleanupWarning || activityLogWarning
+        ? 'Đã xóa file nhưng có cảnh báo khi dọn bộ nhớ hoặc ghi nhật ký hoạt động.'
+        : 'Xóa file đính kèm thành công!',
+      ...(cleanupWarning ? { cleanupWarning: true } : {}),
+      ...(activityLogWarning ? { activityLogWarning: true } : {}),
+    });
+  } catch (error: any) {
+    console.error('Lỗi deleteTaskAttachment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi xóa file đính kèm.',
+      error: error.message,
+    });
+  }
+};
+
+export const getTaskAttachmentContent = async (
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> => {
+  try {
+    const { id: taskId, attachmentId } = req.params;
+    const attachment = await prisma.taskAttachment.findUnique({
+      where: { id: attachmentId },
+      include: { task: { select: { projectId: true } } },
+    });
+
+    if (!attachment || attachment.taskId !== taskId) {
+      res.status(404).json({ success: false, message: 'File đính kèm không tồn tại.' });
+      return;
+    }
+    if (!req.user || !(await canAccessProject(req.user, attachment.task.projectId))) {
+      res.status(403).json({ success: false, message: 'Bạn không có quyền xem file đính kèm này.' });
+      return;
+    }
+
+    const filePathOnDisk = path.join(__dirname, '../../uploads/tasks', path.basename(attachment.fileUrl));
+    res.set({
+      'Cache-Control': 'private, no-store',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`,
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.type(attachment.fileType);
+    res.sendFile(filePathOnDisk, (error) => {
+      if (error && !res.headersSent) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          res.status(404).json({ success: false, message: 'Không tìm thấy file trong bộ nhớ.' });
+          return;
+        }
+        console.error('Lỗi đọc file đính kèm:', error);
+        res.status(500).json({ success: false, message: 'Không thể đọc file đính kèm.' });
+      }
+    });
+  } catch (error: any) {
+    console.error('Lỗi getTaskAttachmentContent:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi đọc file đính kèm.',
       error: error.message,
     });
   }
@@ -370,6 +743,11 @@ export const updateTask = async (req: AuthenticatedRequest, res: Response): Prom
 
     const io = req.app.get('io');
     if (io) {
+      io.to(`project:${updatedTask.projectId}`).emit('task_updated', {
+        projectId: updatedTask.projectId,
+        task: updatedTask,
+        movedBy: userId,
+      });
       io.to(`project:${updatedTask.projectId}`).emit('task:updated', updatedTask);
     }
 
@@ -540,7 +918,10 @@ export const deleteTask = async (req: AuthenticatedRequest, res: Response): Prom
 
     const task = await prisma.task.findUnique({
       where: { id },
-      include: { project: true },
+      include: {
+        project: true,
+        attachments: { select: { fileUrl: true } },
+      },
     });
 
     if (!task) {
@@ -556,6 +937,22 @@ export const deleteTask = async (req: AuthenticatedRequest, res: Response): Prom
       where: { id },
     });
 
+    const cleanupResults = await Promise.allSettled(
+      task.attachments.map((attachment) =>
+        fs.promises.unlink(
+          path.join(__dirname, '../../uploads/tasks', path.basename(attachment.fileUrl))
+        )
+      )
+    );
+    const cleanupFailures = cleanupResults.filter(
+      (result) => result.status === 'rejected' && (result.reason as NodeJS.ErrnoException).code !== 'ENOENT'
+    );
+    cleanupFailures.forEach((result) => {
+      if (result.status === 'rejected') {
+        console.error('Không thể dọn file đính kèm sau khi xóa task:', result.reason);
+      }
+    });
+
     const io = req.app.get('io');
     if (io) {
       io.to(`project:${task.projectId}`).emit('task:deleted', {
@@ -564,20 +961,30 @@ export const deleteTask = async (req: AuthenticatedRequest, res: Response): Prom
       });
     }
 
+    let activityLogWarning = false;
     if (userId) {
-      await logActivity({
-        userId,
-        action: 'TASK_DELETED',
-        entityType: 'TASK',
-        entityId: id,
-        description: `Đã xóa công việc "${task.title}" khỏi dự án "${task.project.name}"`,
-        metadata: { projectId: task.projectId },
-      });
+      try {
+        await logActivity({
+          userId,
+          action: 'TASK_DELETED',
+          entityType: 'TASK',
+          entityId: id,
+          description: `Đã xóa công việc "${task.title}" khỏi dự án "${task.project.name}"`,
+          metadata: { projectId: task.projectId },
+        });
+      } catch (error) {
+        activityLogWarning = true;
+        console.error('Đã xóa task nhưng không thể ghi activity log:', error);
+      }
     }
 
     res.status(200).json({
       success: true,
-      message: 'Xóa công việc thành công!',
+      message: cleanupFailures.length > 0 || activityLogWarning
+        ? 'Đã xóa công việc nhưng có cảnh báo khi dọn file hoặc ghi nhật ký hoạt động.'
+        : 'Xóa công việc thành công!',
+      ...(cleanupFailures.length > 0 ? { cleanupWarning: true } : {}),
+      ...(activityLogWarning ? { activityLogWarning: true } : {}),
     });
   } catch (error: any) {
     console.error('Lỗi deleteTask:', error);

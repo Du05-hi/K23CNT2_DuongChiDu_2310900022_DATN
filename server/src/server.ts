@@ -5,7 +5,6 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import passport from 'passport';
-import path from 'path';
 import { configureGoogleAuth } from './config/googleAuth';
 import { configureSocket } from './config/socket';
 import routes from './routes';
@@ -37,7 +36,6 @@ app.use(morgan('combined'));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(passport.initialize());
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Routes
 app.use('/api', (_req, res, next) => {

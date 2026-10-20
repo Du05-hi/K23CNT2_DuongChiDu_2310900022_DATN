@@ -79,6 +79,7 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
 
   // Attachments state
   const [attachments, setAttachments] = useState<TaskAttachment[]>([]);
+  const [attachmentPreviewUrls, setAttachmentPreviewUrls] = useState<Record<string, string>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize or reset state when task changes
@@ -98,6 +99,36 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
       setIsEditingTitle(false);
     }
   }, [task]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const objectUrls: string[] = [];
+    setAttachmentPreviewUrls({});
+
+    void Promise.all(
+      attachments
+        .filter((attachment) => attachment.fileType.startsWith('image/'))
+        .map(async (attachment) => {
+          try {
+            const blob = await taskService.getTaskAttachmentContent(task?.id || attachment.taskId, attachment.id);
+            const objectUrl = URL.createObjectURL(blob);
+            if (cancelled) {
+              URL.revokeObjectURL(objectUrl);
+              return;
+            }
+            objectUrls.push(objectUrl);
+            setAttachmentPreviewUrls((current) => ({ ...current, [attachment.id]: objectUrl }));
+          } catch (error) {
+            console.error(`Không thể tải ảnh đính kèm ${attachment.fileName}:`, error);
+          }
+        })
+    );
+
+    return () => {
+      cancelled = true;
+      objectUrls.forEach((objectUrl) => URL.revokeObjectURL(objectUrl));
+    };
+  }, [task?.id, attachments]);
 
   // Socket.io for realtime comments
   useEffect(() => {
@@ -184,26 +215,46 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
   };
 
   // Handlers for Attachments
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    const newUploadedFiles: TaskAttachment[] = Array.from(files).map((file, idx) => ({
-      id: `att-${Date.now()}-${idx}`,
-      taskId: task.id,
-      fileName: file.name,
-      fileUrl: URL.createObjectURL(file),
-      fileType: file.type || 'application/octet-stream',
-      fileSize: file.size,
-      createdAt: new Date().toISOString(),
-    }));
-
-    setAttachments((prev) => [...prev, ...newUploadedFiles]);
-    if (fileInputRef.current) fileInputRef.current.value = '';
+    try {
+      const uploaded = await taskService.uploadTaskAttachments(task.id, Array.from(files));
+      setAttachments((prev) => [...uploaded, ...prev]);
+      toast.success(`Đã upload ${uploaded.length} file thành công.`);
+    } catch (error: any) {
+      toast.error(error?.response?.data?.message || 'Không thể upload file đính kèm.');
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
-  const handleDeleteAttachment = (id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  const handleDeleteAttachment = async (id: string) => {
+    try {
+      await taskService.deleteTaskAttachment(task.id, id);
+      setAttachments((prev) => prev.filter((a) => a.id !== id));
+      toast.success('Xóa file đính kèm thành công.');
+    } catch (error: any) {
+      toast.error(error?.response?.data?.message || 'Không thể xóa file đính kèm.');
+    }
+  };
+
+  const handleDownloadAttachment = async (attachment: TaskAttachment) => {
+    try {
+      const blob = await taskService.getTaskAttachmentContent(task.id, attachment.id);
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = attachment.fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (error) {
+      console.error('Không thể tải file đính kèm:', error);
+      toast.error('Không thể tải file đính kèm.');
+    }
   };
 
   // Save changes
@@ -700,7 +751,7 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                           <div className="flex items-center gap-3 min-w-0">
                             {isImage ? (
                               <img
-                                src={att.fileUrl}
+                                src={attachmentPreviewUrls[att.id]}
                                 alt={att.fileName}
                                 className="w-10 h-10 rounded-lg object-cover border"
                               />
@@ -720,16 +771,14 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                           </div>
 
                           <div className="flex items-center gap-1">
-                            <a
-                              href={att.fileUrl}
-                              download={att.fileName}
-                              target="_blank"
-                              rel="noreferrer"
+                            <button
+                              type="button"
+                              onClick={() => void handleDownloadAttachment(att)}
                               className="p-1.5 text-slate-400 hover:text-indigo-600 transition"
                               title="Tải về"
                             >
                               <Download className="w-4 h-4" />
-                            </a>
+                            </button>
                             <button
                               onClick={() => handleDeleteAttachment(att.id)}
                               className="p-1.5 text-slate-400 hover:text-rose-500 transition"

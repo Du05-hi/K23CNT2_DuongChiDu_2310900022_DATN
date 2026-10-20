@@ -2,10 +2,19 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { useAppSelector } from '@/store';
 
-const SOCKET_SERVER_URL = import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const SOCKET_SERVER_URL = import.meta.env.VITE_SOCKET_URL || (() => {
+  try {
+    return new URL(API_BASE_URL, window.location.origin).origin;
+  } catch {
+    return 'http://localhost:5000';
+  }
+})();
 
 // Global socket instance (singleton) để tránh mở nhiều kết nối WebSocket trùng lặp
 let globalSocket: Socket | null = null;
+let currentSocketToken: string | null = null;
+const joinedProjectIds = new Set<string>();
 
 export const getSocketInstance = (): Socket | null => globalSocket;
 
@@ -28,6 +37,8 @@ export const useSocket = (): UseSocketReturn => {
         globalSocket.disconnect();
         globalSocket = null;
         socketRef.current = null;
+        currentSocketToken = null;
+        joinedProjectIds.clear();
         setIsConnected(false);
       }
       return;
@@ -47,12 +58,22 @@ export const useSocket = (): UseSocketReturn => {
       });
 
       socketRef.current = globalSocket;
+      currentSocketToken = token;
+    } else if (currentSocketToken !== token) {
+      globalSocket.auth = { token };
+      currentSocketToken = token;
+      if (globalSocket.connected) {
+        globalSocket.disconnect().connect();
+      }
     }
 
     const socket = globalSocket;
 
     const handleConnect = () => {
       setIsConnected(true);
+      joinedProjectIds.forEach((projectId) => {
+        socket.emit('join_project', { projectId });
+      });
     };
 
     const handleDisconnect = () => {
@@ -80,14 +101,20 @@ export const useSocket = (): UseSocketReturn => {
   }, [token, isAuthenticated]);
 
   const joinProject = useCallback((projectId: string) => {
-    if (globalSocket && globalSocket.connected && projectId) {
-      globalSocket.emit('project:join', { projectId });
+    if (projectId) {
+      joinedProjectIds.add(projectId);
+      if (globalSocket?.connected) {
+        globalSocket.emit('join_project', { projectId });
+      }
     }
   }, []);
 
   const leaveProject = useCallback((projectId: string) => {
-    if (globalSocket && globalSocket.connected && projectId) {
-      globalSocket.emit('project:leave', { projectId });
+    if (projectId) {
+      joinedProjectIds.delete(projectId);
+      if (globalSocket?.connected) {
+        globalSocket.emit('leave_project', { projectId });
+      }
     }
   }, []);
 

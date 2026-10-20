@@ -51,6 +51,7 @@ export interface Task {
   };
   assigneeId?: string | null;
   assignee?: UserSummary;
+  position?: number;
   createdById: string;
   creator?: UserSummary;
   dueDate?: string;
@@ -59,6 +60,11 @@ export interface Task {
   subTasks?: SubTask[];
   comments?: Comment[];
   attachments?: TaskAttachment[];
+  _count?: {
+    attachments?: number;
+    comments?: number;
+    subTasks?: number;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -148,6 +154,29 @@ export const taskService = {
 
   async deleteSubTask(taskId: string, subTaskId: string): Promise<void> {
     await api.delete(`/tasks/subtasks/${subTaskId}`);
+  },
+
+  async uploadTaskAttachments(taskId: string, files: File[]): Promise<TaskAttachment[]> {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+
+    const response = await api.post<TaskAttachment[]>(`/tasks/${taskId}/attachments`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+
+    return response.data;
+  },
+
+  async getTaskAttachmentContent(taskId: string, attachmentId: string): Promise<Blob> {
+    const response = await api.get<Blob>(
+      `/tasks/${taskId}/attachments/${attachmentId}/content`,
+      { responseType: 'blob' }
+    );
+    return response.data;
+  },
+
+  async deleteTaskAttachment(taskId: string, attachmentId: string): Promise<void> {
+    await api.delete(`/tasks/${taskId}/attachments/${attachmentId}`);
   },
 
   async searchTasksNL(query: string, projectId?: string): Promise<Task[]> {

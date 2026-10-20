@@ -1,4 +1,5 @@
 import { Response } from 'express';
+import bcrypt from 'bcryptjs';
 import { prisma } from '../config/prisma';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 import { logActivity } from '../services/activityLogService';
@@ -472,19 +473,30 @@ export const getRoleDashboard = async (req: AuthenticatedRequest, res: Response)
       : { assigneeId: user.id };
 
     const currentPeriod = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+    const now = new Date();
+
     const [projectCount, activeProjectCount, taskGroups, overdue, recentProjects, recentTasks, teamSize, monthlyKpi] =
       await Promise.all([
         prisma.project.count({ where: projectScope }),
         prisma.project.count({ where: { ...projectScope, status: 'IN_PROGRESS' } }),
         prisma.task.groupBy({ by: ['status'], where: taskScope, _count: { status: true } }),
         prisma.task.count({
-          where: { ...taskScope, status: { not: 'DONE' }, dueDate: { lt: new Date() } },
+          where: { ...taskScope, status: { not: 'DONE' }, dueDate: { lt: now } },
         }),
         prisma.project.findMany({
           where: projectScope,
           orderBy: { updatedAt: 'desc' },
           take: 5,
-          include: { _count: { select: { tasks: true, members: true } } },
+          include: {
+            _count: { select: { tasks: true, members: true } },
+            members: {
+              select: {
+                user: {
+                  select: { id: true, name: true, avatar: true },
+                },
+              },
+            },
+          },
         }),
         prisma.task.findMany({
           where: taskScope,
@@ -518,6 +530,186 @@ export const getRoleDashboard = async (req: AuthenticatedRequest, res: Response)
       tasks.total += item._count.status;
     }
 
+    const allTasks = await prisma.task.findMany({
+      where: taskScope,
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        dueDate: true,
+        updatedAt: true,
+        assigneeId: true,
+        projectId: true,
+        project: { select: { id: true, name: true } },
+        assignee: { select: { id: true, name: true, avatar: true } },
+      },
+    });
+
+    const projectList = await prisma.project.findMany({
+      where: projectScope,
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        startDate: true,
+        endDate: true,
+        description: true,
+        members: {
+          select: {
+            user: {
+              select: { id: true, name: true, avatar: true },
+            },
+          },
+        },
+        tasks: {
+          select: { id: true, status: true, dueDate: true },
+        },
+      },
+    });
+
+    const projectSummaries = projectList.map((project) => {
+      const totalTasks = project.tasks.length;
+      const completedTasks = project.tasks.filter((task) => task.status === 'DONE').length;
+      const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+      const startDate = project.startDate ? new Date(project.startDate) : null;
+      const endDate = project.endDate ? new Date(project.endDate) : null;
+      const budgetDays = startDate && endDate ? Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / 86400000)) : 0;
+
+      return {
+        id: project.id,
+        name: project.name,
+        status: project.status,
+        description: project.description,
+        startDate: startDate ? startDate.toISOString() : null,
+        endDate: endDate ? endDate.toISOString() : null,
+        budgetDays,
+        progress: completionRate,
+        members: project.members.map((member) => member.user),
+      };
+    });
+
+    const teamMembers = user.role === 'MANAGER'
+      ? await prisma.user.findMany({
+          where: {
+            isActive: true,
+            OR: [
+              ...(user.departmentId ? [{ departmentId: user.departmentId }] : []),
+              { projectMembers: { some: { project: projectScope } } },
+            ],
+          },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+            avatar: true,
+            isActive: true,
+            department: { select: { id: true, name: true } },
+            assignedTasks: {
+              select: {
+                id: true,
+                status: true,
+                priority: true,
+                dueDate: true,
+              },
+            },
+            kpiLogs: {
+              orderBy: { period: 'desc' },
+              take: 3,
+              select: { totalScore: true },
+            },
+          },
+          orderBy: { name: 'asc' },
+        })
+      : [];
+
+    const staffPerformance = teamMembers.map((member) => {
+      const tasks = member.assignedTasks ?? [];
+      const completed = tasks.filter((task) => task.status === 'DONE').length;
+      const onTime = tasks.filter((task) => task.status === 'DONE' || !task.dueDate || new Date(task.dueDate) >= now).length;
+      const late = tasks.filter((task) => task.status !== 'DONE' && task.dueDate && new Date(task.dueDate) < now).length;
+      const completionRate = tasks.length > 0 ? Math.round((completed / tasks.length) * 100) : 0;
+      const avgKpi = member.kpiLogs.length > 0
+        ? member.kpiLogs.reduce((sum, item) => sum + (item.totalScore ?? 0), 0) / member.kpiLogs.length
+        : 0;
+
+      return {
+        id: member.id,
+        name: member.name,
+        email: member.email,
+        role: member.role,
+        avatar: member.avatar,
+        isActive: member.isActive,
+        department: member.department,
+        tasksAssigned: tasks.length,
+        tasksOnTime: onTime,
+        tasksLate: late,
+        contributionRate: completionRate,
+        kpiScore: Math.round(avgKpi),
+      };
+    });
+
+    const approvalQueue = await prisma.task.findMany({
+      where: { ...taskScope, status: 'REVIEW' },
+      orderBy: [{ dueDate: 'asc' }, { updatedAt: 'desc' }],
+      take: 8,
+      include: {
+        project: { select: { id: true, name: true } },
+        assignee: { select: { id: true, name: true, avatar: true } },
+        creator: { select: { id: true, name: true } },
+      },
+    });
+
+    const dueTaskList = allTasks.filter((task) => task.status !== 'DONE' && task.dueDate && new Date(task.dueDate) < now);
+    const completedTaskList = allTasks.filter((task) => task.status === 'DONE');
+    const statusBreakdown = [
+      { name: 'TO_DO', value: tasks.TODO, color: '#64748b' },
+      { name: 'IN_PROGRESS', value: tasks.IN_PROGRESS, color: '#3b82f6' },
+      { name: 'REVIEW', value: tasks.REVIEW, color: '#f59e0b' },
+      { name: 'DONE', value: tasks.DONE, color: '#10b981' },
+    ];
+
+    const weeklyTrendMap = new Map<string, number>();
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 41);
+    for (let index = 0; index < 6; index += 1) {
+      const current = new Date();
+      current.setDate(current.getDate() - (41 - index * 7));
+      const label = `${current.toLocaleDateString('vi-VN', { month: 'short', day: 'numeric' })}`;
+      weeklyTrendMap.set(label, 0);
+    }
+
+    for (const task of allTasks) {
+      if (task.status !== 'DONE' || !task.updatedAt) continue;
+      const updatedAt = new Date(task.updatedAt);
+      if (updatedAt < startDate || updatedAt > now) continue;
+      const label = updatedAt.toLocaleDateString('vi-VN', { month: 'short', day: 'numeric' });
+      weeklyTrendMap.set(label, (weeklyTrendMap.get(label) ?? 0) + 1);
+    }
+
+    const weeklyTrend = Array.from(weeklyTrendMap.entries()).map(([label, value]) => ({
+      label,
+      completed: value,
+    }));
+
+    const normalizeTask = (task: any) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      priority: task.priority,
+      project: task.project,
+      assignee: task.assignee,
+      dueDate: task.dueDate ? new Date(task.dueDate).toISOString() : null,
+      overdueDays: task.dueDate && task.status !== 'DONE'
+        ? Math.max(0, Math.ceil((now.getTime() - new Date(task.dueDate).getTime()) / 86400000))
+        : 0,
+    });
+
+    const overdueTasks = dueTaskList.map(normalizeTask);
+    const completedTasks = completedTaskList.map(normalizeTask);
+
     res.status(200).json({
       success: true,
       data: {
@@ -528,6 +720,22 @@ export const getRoleDashboard = async (req: AuthenticatedRequest, res: Response)
         monthlyKpi,
         recentProjects,
         recentTasks,
+        teamMembers: staffPerformance,
+        projectList: projectSummaries,
+        approvalQueue: approvalQueue.map((task) => ({
+          id: task.id,
+          title: task.title,
+          status: task.status,
+          priority: task.priority,
+          dueDate: task.dueDate ? new Date(task.dueDate).toISOString() : null,
+          project: task.project,
+          assignee: task.assignee,
+          creator: task.creator,
+        })),
+        statusBreakdown,
+        weeklyTrend,
+        overdueTasks,
+        completedTasks,
       },
     });
   } catch (error: any) {
@@ -624,6 +832,444 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
     res.status(500).json({
       success: false,
       message: 'Lỗi máy chủ khi lấy thống kê dashboard admin.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 8. Tạo người dùng mới trực tiếp bởi Admin
+ */
+export const createUser = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { name, email, password, role, departmentId } = req.body;
+    const adminId = req.user?.id;
+
+    if (!name || !email || !password) {
+      res.status(400).json({ success: false, message: 'Vui lòng cung cấp đầy đủ tên, email và mật khẩu.' });
+      return;
+    }
+
+    const trimmedEmail = String(email).trim().toLowerCase();
+    const trimmedName = String(name).trim();
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmedEmail)) {
+      res.status(400).json({ success: false, message: 'Định dạng email không hợp lệ.' });
+      return;
+    }
+
+    if (String(password).length < 6) {
+      res.status(400).json({ success: false, message: 'Mật khẩu phải chứa ít nhất 6 ký tự.' });
+      return;
+    }
+
+    const existingUser = await prisma.user.findUnique({
+      where: { email: trimmedEmail },
+    });
+
+    if (existingUser) {
+      res.status(409).json({ success: false, message: 'Email này đã tồn tại trong hệ thống.' });
+      return;
+    }
+
+    const validRole = ['ADMIN', 'MANAGER', 'EMPLOYEE'].includes(role) ? role : 'EMPLOYEE';
+
+    if (departmentId) {
+      const dept = await prisma.department.findUnique({ where: { id: departmentId } });
+      if (!dept) {
+        res.status(400).json({ success: false, message: 'Phòng ban được chọn không tồn tại.' });
+        return;
+      }
+    }
+
+    const hashedPassword = await bcrypt.hash(String(password), 12);
+
+    const newUser = await prisma.user.create({
+      data: {
+        name: trimmedName,
+        email: trimmedEmail,
+        password: hashedPassword,
+        role: validRole,
+        isActive: true,
+        departmentId: departmentId || null,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        isActive: true,
+        avatar: true,
+        departmentId: true,
+        department: {
+          select: { id: true, name: true },
+        },
+        createdAt: true,
+      },
+    });
+
+    if (adminId) {
+      await logActivity({
+        userId: adminId,
+        action: 'USER_CREATED',
+        entityType: 'USER',
+        entityId: newUser.id,
+        description: `Quản trị viên tạo tài khoản mới: ${newUser.name} (${newUser.email}) - Vai trò: ${newUser.role}`,
+        metadata: { createdUserId: newUser.id, role: newUser.role, departmentId: newUser.departmentId },
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Tạo tài khoản người dùng thành công!',
+      data: newUser,
+    });
+  } catch (error: any) {
+    console.error('Lỗi createUser:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi tạo người dùng.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 9. Cập nhật phòng ban của người dùng (Admin only)
+ */
+export const updateUserDepartment = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { departmentId } = req.body;
+    const adminId = req.user?.id;
+
+    const targetUser = await prisma.user.findUnique({
+      where: { id },
+      include: { department: true },
+    });
+
+    if (!targetUser) {
+      res.status(404).json({ success: false, message: 'Người dùng không tồn tại.' });
+      return;
+    }
+
+    let deptName = 'Không thuộc phòng ban';
+    if (departmentId) {
+      const dept = await prisma.department.findUnique({ where: { id: departmentId } });
+      if (!dept) {
+        res.status(400).json({ success: false, message: 'Phòng ban không tồn tại.' });
+        return;
+      }
+      deptName = dept.name;
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id },
+      data: {
+        departmentId: departmentId || null,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        isActive: true,
+        avatar: true,
+        departmentId: true,
+        department: {
+          select: { id: true, name: true },
+        },
+        updatedAt: true,
+      },
+    });
+
+    if (adminId) {
+      await logActivity({
+        userId: adminId,
+        action: 'USER_DEPARTMENT_CHANGED',
+        entityType: 'USER',
+        entityId: id,
+        description: `Chuyển phòng ban nhân sự "${targetUser.name}" sang "${deptName}"`,
+        metadata: {
+          targetUserId: id,
+          oldDepartment: targetUser.department?.name ?? null,
+          newDepartment: deptName,
+        },
+      });
+    }
+
+    req.app.get('io')?.emit('projects:changed');
+
+    res.status(200).json({
+      success: true,
+      message: `Đã cập nhật phòng ban cho ${targetUser.name}!`,
+      data: updatedUser,
+    });
+  } catch (error: any) {
+    console.error('Lỗi updateUserDepartment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi cập nhật phòng ban người dùng.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 10. Đặt lại mật khẩu khẩn cấp cho người dùng (Admin only)
+ */
+export const resetUserPassword = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { newPassword } = req.body;
+    const adminId = req.user?.id;
+
+    if (!newPassword || String(newPassword).length < 6) {
+      res.status(400).json({
+        success: false,
+        message: 'Mật khẩu mới phải có độ dài ít nhất 6 ký tự.',
+      });
+      return;
+    }
+
+    const targetUser = await prisma.user.findUnique({ where: { id } });
+    if (!targetUser) {
+      res.status(404).json({ success: false, message: 'Người dùng không tồn tại.' });
+      return;
+    }
+
+    const hashedPassword = await bcrypt.hash(String(newPassword), 12);
+
+    await prisma.user.update({
+      where: { id },
+      data: { password: hashedPassword },
+    });
+
+    if (adminId) {
+      await logActivity({
+        userId: adminId,
+        action: 'USER_PASSWORD_RESET',
+        entityType: 'USER',
+        entityId: id,
+        description: `Đặt lại mật khẩu cho tài khoản "${targetUser.name}" (${targetUser.email})`,
+        metadata: { targetUserId: id },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Đã đặt lại mật khẩu thành công cho ${targetUser.name}!`,
+    });
+  } catch (error: any) {
+    console.error('Lỗi resetUserPassword:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi đặt lại mật khẩu.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 11. Xóa phòng ban an toàn (Admin only)
+ */
+export const deleteDepartment = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const adminId = req.user?.id;
+
+    const department = await prisma.department.findUnique({
+      where: { id },
+      include: {
+        _count: {
+          select: { users: true, projects: true },
+        },
+      },
+    });
+
+    if (!department) {
+      res.status(404).json({ success: false, message: 'Phòng ban không tồn tại.' });
+      return;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Bỏ liên kết nhân sự thuộc phòng ban
+      await tx.user.updateMany({
+        where: { departmentId: id },
+        data: { departmentId: null },
+      });
+
+      // Bỏ liên kết dự án thuộc phòng ban
+      await tx.project.updateMany({
+        where: { departmentId: id },
+        data: { departmentId: null },
+      });
+
+      // Xóa phòng ban
+      await tx.department.delete({
+        where: { id },
+      });
+    });
+
+    if (adminId) {
+      await logActivity({
+        userId: adminId,
+        action: 'DEPARTMENT_DELETED',
+        entityType: 'DEPARTMENT',
+        entityId: id,
+        description: `Xóa phòng ban "${department.name}"`,
+        metadata: { departmentName: department.name },
+      });
+    }
+
+    req.app.get('io')?.emit('projects:changed');
+
+    res.status(200).json({
+      success: true,
+      message: `Đã xóa phòng ban "${department.name}" thành công!`,
+    });
+  } catch (error: any) {
+    console.error('Lỗi deleteDepartment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi xóa phòng ban.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 12. Lấy danh sách Audit Logs đầy đủ cho Admin
+ */
+export const getAuditLogs = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { search, action, entityType, limit = '100', page = '1' } = req.query;
+
+    const pageNum = Math.max(1, Number.parseInt(String(page), 10) || 1);
+    const limitNum = Math.max(1, Math.min(200, Number.parseInt(String(limit), 10) || 100));
+    const skip = (pageNum - 1) * limitNum;
+
+    const where: any = {};
+
+    if (action && action !== 'ALL') {
+      where.action = { contains: String(action) };
+    }
+
+    if (entityType && entityType !== 'ALL') {
+      where.entityType = String(entityType);
+    }
+
+    if (search) {
+      where.OR = [
+        { description: { contains: String(search) } },
+        { action: { contains: String(search) } },
+        { user: { name: { contains: String(search) } } },
+        { user: { email: { contains: String(search) } } },
+      ];
+    }
+
+    const [logs, total] = await Promise.all([
+      prisma.activityLog.findMany({
+        where,
+        take: limitNum,
+        skip,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              role: true,
+              avatar: true,
+            },
+          },
+        },
+      }),
+      prisma.activityLog.count({ where }),
+    ]);
+
+    sendPaginated(res, logs, total, pageNum, limitNum, 'Lấy danh sách nhật ký hệ thống thành công.');
+  } catch (error: any) {
+    console.error('Lỗi getAuditLogs:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi lấy nhật ký kiểm toán.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 13. Kiểm tra tình trạng Server & Database (Admin Health Metrics)
+ */
+export const getSystemHealth = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const startTime = Date.now();
+    await prisma.$queryRaw`SELECT 1`;
+    const dbLatencyMs = Date.now() - startTime;
+
+    const uptimeSeconds = Math.floor(process.uptime());
+    const hours = Math.floor(uptimeSeconds / 3600);
+    const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+    const seconds = uptimeSeconds % 60;
+    const uptimeFormatted = `${hours}h ${minutes}m ${seconds}s`;
+
+    const memoryUsage = process.memoryUsage();
+    const toMB = (bytes: number) => Math.round((bytes / 1024 / 1024) * 100) / 100;
+
+    const io = req.app.get('io');
+    const connectedSockets = io?.engine?.clientsCount ?? 0;
+
+    const [userCount, activeUserCount, departmentCount, projectCount, taskCount] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { isActive: true } }),
+      prisma.department.count(),
+      prisma.project.count(),
+      prisma.task.count(),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        status: 'ONLINE',
+        database: {
+          status: 'CONNECTED',
+          engine: 'MySQL (Prisma ORM)',
+          latencyMs: dbLatencyMs,
+          health: dbLatencyMs < 50 ? 'EXCELLENT' : dbLatencyMs < 200 ? 'GOOD' : 'SLOW',
+        },
+        server: {
+          nodeVersion: process.version,
+          platform: process.platform,
+          uptimeSeconds,
+          uptimeFormatted,
+          memory: {
+            heapUsedMB: toMB(memoryUsage.heapUsed),
+            heapTotalMB: toMB(memoryUsage.heapTotal),
+            rssMB: toMB(memoryUsage.rss),
+          },
+        },
+        realtime: {
+          status: 'ACTIVE',
+          connectedClients: connectedSockets,
+        },
+        records: {
+          users: userCount,
+          activeUsers: activeUserCount,
+          departments: departmentCount,
+          projects: projectCount,
+          tasks: taskCount,
+        },
+        timestamp: new Date().toISOString(),
+      },
+    });
+  } catch (error: any) {
+    console.error('Lỗi getSystemHealth:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi kiểm tra trạng thái hệ thống.',
       error: error.message,
     });
   }

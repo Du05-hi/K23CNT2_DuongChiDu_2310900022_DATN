@@ -77,6 +77,7 @@ model User {
   assignedTasks   Task[]          @relation("TaskAssignee")
   createdTasks    Task[]          @relation("TaskCreator")
   comments        Comment[]
+  uploadedFiles   TaskAttachment[] @relation("AttachmentUploader")
   kpiLogs         KpiLog[]
   notifications   Notification[]
   activityLogs    ActivityLog[]
@@ -114,25 +115,43 @@ model ProjectMember {
 }
 
 model Task {
-  id             String       @id @default(uuid())
+  id             String          @id @default(uuid())
   title          String
   description    String?
-  status         TaskStatus   @default(TODO)
-  priority       TaskPriority @default(MEDIUM)
+  status         TaskStatus      @default(TODO)
+  priority       TaskPriority    @default(MEDIUM)
   dueDate        DateTime?
-  position       Int          @default(0)
+  position       Int             @default(0)
   estimatedHours Float?
   actualHours    Float?
   projectId      String
-  project        Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   assigneeId     String?
-  assignee       User?        @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  assignee       User?           @relation("TaskAssignee", fields: [assigneeId], references: [id])
   createdById    String
-  creator        User         @relation("TaskCreator", fields: [createdById], references: [id])
+  creator        User            @relation("TaskCreator", fields: [createdById], references: [id])
   subTasks       SubTask[]
   comments       Comment[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  attachments    TaskAttachment[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+}
+
+model TaskAttachment {
+  id          String   @id @default(uuid())
+  taskId      String
+  task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  fileName    String
+  fileUrl     String
+  fileType    String
+  fileSize    Int
+  uploadedById String?
+  uploader    User?    @relation("AttachmentUploader", fields: [uploadedById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([taskId])
+  @@index([uploadedById])
 }
 
 model SubTask {

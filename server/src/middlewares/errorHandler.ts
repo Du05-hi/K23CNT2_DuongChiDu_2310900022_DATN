@@ -62,6 +62,15 @@ export const errorHandler = (
     message = err.message;
     details = err.details;
   }
+  // Handle Multer upload errors with client-facing status codes.
+  else if (err.name === 'MulterError') {
+    statusCode = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    message = err.code === 'LIMIT_FILE_SIZE'
+      ? 'File vượt quá giới hạn 25MB.'
+      : err.code === 'LIMIT_FILE_COUNT'
+        ? 'Mỗi lần chỉ được tải lên tối đa 10 file.'
+        : 'Không thể xử lý file tải lên.';
+  }
   // Handle Prisma Known Request Errors
   else if (err instanceof Prisma.PrismaClientKnownRequestError) {
     switch (err.code) {

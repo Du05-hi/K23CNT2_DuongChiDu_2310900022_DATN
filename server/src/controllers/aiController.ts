@@ -4,6 +4,7 @@ import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 import {
   taskBreakdown,
   generateProgressSummary,
+  generatePersonalWorkInsights,
   detectProjectRisks,
   parseNaturalLanguageSearch,
   ProjectRiskInput,
@@ -19,7 +20,7 @@ export const breakdownTask = async (req: AuthenticatedRequest, res: Response): P
     const { title, description } = req.body;
 
     if (!title || !title.trim()) {
-      res.status(400).json({
+      res.status(200).json({
         success: false,
         message: 'Tiêu đề công việc là bắt buộc để AI phân tích phân tách.',
       });
@@ -34,10 +35,10 @@ export const breakdownTask = async (req: AuthenticatedRequest, res: Response): P
       data: suggestions,
     });
   } catch (error: any) {
-    console.error('Lỗi breakdownTask AI:', error);
-    res.status(500).json({
+    console.error('[AI][breakdownTask] Lỗi:', error);
+    res.status(200).json({
       success: false,
-      message: error.message || 'Lỗi khi gọi AI phân tách công việc.',
+      message: 'Trợ lý AI hiện chưa thể phân tích, vui lòng thử lại sau.',
     });
   }
 };
@@ -50,7 +51,7 @@ export const generateSummary = async (req: AuthenticatedRequest, res: Response):
     const { projectId } = req.body;
 
     if (!projectId) {
-      res.status(400).json({
+      res.status(200).json({
         success: false,
         message: 'Vui lòng cung cấp projectId cần đánh giá tiến độ.',
       });
@@ -71,14 +72,14 @@ export const generateSummary = async (req: AuthenticatedRequest, res: Response):
     });
 
     if (!project) {
-      res.status(404).json({
+      res.status(200).json({
         success: false,
         message: 'Không tìm thấy thông tin dự án chỉ định.',
       });
       return;
     }
     if (!req.user || !(await canAccessProject(req.user, project.id))) {
-      res.status(403).json({
+      res.status(200).json({
         success: false,
         message: 'Bạn không có quyền xem dữ liệu của dự án này.',
       });
@@ -87,13 +88,13 @@ export const generateSummary = async (req: AuthenticatedRequest, res: Response):
 
     const taskInputs: TaskSummaryInput[] = project.tasks.map((t) => ({
       id: t.id,
-      title: t.title,
-      status: t.status,
-      priority: t.priority,
+      title: t.title || 'Công việc chưa có tiêu đề',
+      status: t.status || 'TODO',
+      priority: t.priority || 'MEDIUM',
       dueDate: t.dueDate ? t.dueDate.toISOString() : null,
-      assigneeName: t.assignee?.name || null,
-      estimatedHours: t.estimatedHours,
-      actualHours: t.actualHours,
+      assigneeName: t.assignee?.name || 'Chưa phân công',
+      estimatedHours: typeof t.estimatedHours === 'number' ? t.estimatedHours : 0,
+      actualHours: typeof t.actualHours === 'number' ? t.actualHours : 0,
     }));
 
     const summaryReport = await generateProgressSummary(project.name, taskInputs);
@@ -107,10 +108,60 @@ export const generateSummary = async (req: AuthenticatedRequest, res: Response):
       },
     });
   } catch (error: any) {
-    console.error('Lỗi generateSummary AI:', error);
-    res.status(500).json({
+    console.error('[AI][generateSummary] Lỗi:', error);
+    res.status(200).json({
       success: false,
-      message: error.message || 'Lỗi khi sinh báo cáo tiến độ bằng AI.',
+      message: 'Trợ lý AI hiện chưa thể phân tích, vui lòng thử lại sau.',
+    });
+  }
+};
+
+export const generateMyWorkInsights = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(200).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
+
+    const tasks = await prisma.task.findMany({
+      where: { assigneeId: user.id },
+      orderBy: [{ dueDate: 'asc' }, { updatedAt: 'desc' }],
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        priority: true,
+        dueDate: true,
+        estimatedHours: true,
+        actualHours: true,
+        project: { select: { name: true } },
+      },
+    });
+
+    const safeTasks = tasks.map((task) => ({
+      id: task.id,
+      title: task.title || 'Công việc chưa được đặt tên',
+      status: task.status || 'TODO',
+      priority: task.priority || 'MEDIUM',
+      dueDate: task.dueDate ? task.dueDate.toISOString() : null,
+      estimatedHours: typeof task.estimatedHours === 'number' ? task.estimatedHours : 0,
+      actualHours: typeof task.actualHours === 'number' ? task.actualHours : 0,
+      projectName: task.project?.name || 'Dự án chưa xác định',
+      assigneeName: user.name || 'Bạn',
+    }));
+
+    const summaryMarkdown = await generatePersonalWorkInsights(user.name ?? 'nhân viên', safeTasks);
+
+    res.status(200).json({
+      success: true,
+      data: { summaryMarkdown },
+    });
+  } catch (error: any) {
+    console.error('[AI][generateMyWorkInsights] Lỗi:', error);
+    res.status(200).json({
+      success: false,
+      message: 'Trợ lý AI hiện chưa thể phân tích, vui lòng thử lại sau.',
     });
   }
 };
@@ -122,7 +173,7 @@ export const detectRisks = async (req: AuthenticatedRequest, res: Response): Pro
   try {
     const user = req.user;
     if (!user) {
-      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      res.status(200).json({ success: false, message: 'Chưa xác thực người dùng.' });
       return;
     }
 
@@ -180,8 +231,8 @@ export const detectRisks = async (req: AuthenticatedRequest, res: Response): Pro
 
       return {
         projectId: p.id,
-        projectName: p.name,
-        status: p.status,
+        projectName: p.name || 'Dự án chưa đặt tên',
+        status: p.status || 'PLANNING',
         totalTasks,
         completedTasks,
         overdueTasks,
@@ -200,10 +251,11 @@ export const detectRisks = async (req: AuthenticatedRequest, res: Response): Pro
       data: riskWarnings,
     });
   } catch (error: any) {
-    console.error('Lỗi detectRisks AI:', error);
-    res.status(500).json({
+    console.error('[AI][detectRisks] Lỗi:', error);
+    res.status(200).json({
       success: false,
-      message: error.message || 'Lỗi khi phân tích rủi ro dự án bằng AI.',
+      message: 'Trợ lý AI hiện chưa thể phân tích, vui lòng thử lại sau.',
+      data: [],
     });
   }
 };
@@ -216,14 +268,13 @@ export const searchTasksNL = async (req: AuthenticatedRequest, res: Response): P
     const { query, projectId } = req.body;
 
     if (!query || !query.trim()) {
-      res.status(400).json({
+      res.status(200).json({
         success: false,
         message: 'Vui lòng cung cấp nội dung tìm kiếm tự nhiên.',
       });
       return;
     }
 
-    // Nhờ Gemini phân tích câu nói
     const parsed = await parseNaturalLanguageSearch(query.trim());
 
     const taskWhere: any = {};
@@ -252,12 +303,9 @@ export const searchTasksNL = async (req: AuthenticatedRequest, res: Response): P
       ];
     }
 
-    // Nếu AI phát hiện tên người thực hiện
     if (parsed.assigneeName) {
       const matchedUsers = await prisma.user.findMany({
-        where: {
-          name: { contains: parsed.assigneeName },
-        },
+        where: { name: { contains: parsed.assigneeName } },
         select: { id: true },
       });
 
@@ -288,10 +336,10 @@ export const searchTasksNL = async (req: AuthenticatedRequest, res: Response): P
       data: tasks,
     });
   } catch (error: any) {
-    console.error('Lỗi searchTasksNL:', error);
-    res.status(500).json({
+    console.error('[AI][searchTasksNL] Lỗi:', error);
+    res.status(200).json({
       success: false,
-      message: error.message || 'Lỗi khi tìm kiếm công việc bằng ngôn ngữ tự nhiên.',
+      message: 'Trợ lý AI hiện chưa thể tìm kiếm, vui lòng thử lại sau.',
     });
   }
 };
