@@ -3,7 +3,8 @@ import ReactDOM from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter } from 'react-router-dom';
-import { Toaster } from 'sonner';
+import { Toaster as SonnerToaster } from 'sonner';
+import { Toaster as HotToaster } from 'react-hot-toast';
 import { store } from './store';
 import App from './App';
 import './index.css';
@@ -24,7 +25,8 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <App />
-          <Toaster position="top-right" richColors closeButton />
+          <SonnerToaster position="top-right" richColors closeButton />
+          <HotToaster position="top-right" toastOptions={{ duration: 3500 }} />
         </BrowserRouter>
       </QueryClientProvider>
     </Provider>

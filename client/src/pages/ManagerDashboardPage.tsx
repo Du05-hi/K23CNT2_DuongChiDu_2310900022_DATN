@@ -31,6 +31,7 @@ import TaskDetailsModal from '@/components/TaskDetailsModal';
 import DashboardAiResponse from '@/components/DashboardAiResponse';
 import { useAuth } from '@/hooks/useAuth';
 import { useSocket } from '@/hooks/useSocket';
+import { toast } from 'sonner';
 import aiService from '@/services/aiService';
 import taskService from '@/services/taskService';
 
@@ -235,17 +236,33 @@ const ManagerDashboardPage: React.FC = () => {
     setAiError(null);
     try {
       const risksRaw = await aiService.detectRisks();
-      const risks = Array.isArray(risksRaw) ? risksRaw : [];
-      const highestWorkloadMember = [...staffMembers].sort((a, b) => b.tasksAssigned - a.tasksAssigned)[0];
-      const riskLines = risks.slice(0, 3).map((risk) =>
-        `- **${risk.projectName ?? 'Dự án'}** (${risk.riskLevel}): ${risk.description || 'Gemini chưa trả về nguyên nhân cụ thể.'}`
-      );
-      const recommendations = [...new Set(risks.map((risk) => (typeof risk.recommendation === 'string' ? risk.recommendation : '').trim()).filter(Boolean))].slice(0, 3);
+      const risks = Array.isArray(risksRaw)
+        ? risksRaw
+        : Array.isArray((risksRaw as any)?.data)
+        ? (risksRaw as any).data
+        : [];
+      const highestWorkloadMember = Array.isArray(staffMembers) && staffMembers.length > 0
+        ? [...staffMembers].sort((a, b) => (b.tasksAssigned || 0) - (a.tasksAssigned || 0))[0]
+        : null;
+      const riskLines = Array.isArray(risks)
+        ? risks.slice(0, 3).map((risk) =>
+            `- **${risk.projectName || risk.title || 'Dự án'}** (${risk.riskLevel || 'LOW'}): ${risk.description || 'Gemini chưa trả về nguyên nhân cụ thể.'}`
+          )
+        : [];
+      const recommendations = Array.isArray(risks)
+        ? [
+            ...new Set(
+              risks
+                .map((risk) => (typeof risk.recommendation === 'string' ? risk.recommendation : '').trim())
+                .filter(Boolean)
+            ),
+          ].slice(0, 3)
+        : [];
 
       setAiSummary([
         '### Tải công việc',
         highestWorkloadMember
-          ? `- **${highestWorkloadMember.name}** có ${highestWorkloadMember.tasksAssigned} task được giao, trong đó ${highestWorkloadMember.tasksLate} task trễ hạn. Đây là người có số task được gán cao nhất trong dữ liệu nhân sự hiện tại.`
+          ? `- **${highestWorkloadMember.name}** có ${highestWorkloadMember.tasksAssigned || 0} task được giao, trong đó ${highestWorkloadMember.tasksLate || 0} task trễ hạn. Đây là người có số task được gán cao nhất trong dữ liệu nhân sự hiện tại.`
           : '- Backend hiện không trả về nhân sự trong phạm vi quản lý.',
         '',
         '### Rủi ro dự án từ Gemini',
@@ -254,9 +271,12 @@ const ManagerDashboardPage: React.FC = () => {
         '### Đề xuất phân bổ',
         ...(recommendations.length ? recommendations.map((recommendation) => `- ${recommendation}`) : ['- Gemini chưa trả về đề xuất cho các dự án trong phạm vi hiện tại.']),
       ].join('\n'));
+      toast.success('AI Gemini đã hoàn tất phân tích tải công việc & rủi ro! ✨');
     } catch (error) {
       console.error('Không thể phân tích rủi ro quản trị:', error);
-      setAiError(error instanceof Error ? error.message : 'Không thể lấy phân tích từ AI. Vui lòng thử lại.');
+      const msg = error instanceof Error ? error.message : 'Không thể lấy phân tích từ AI. Vui lòng thử lại.';
+      setAiError(msg);
+      toast.error(msg);
     } finally {
       setIsAiLoading(false);
     }
@@ -271,8 +291,10 @@ const ManagerDashboardPage: React.FC = () => {
       }
       setApprovalComments((current) => ({ ...current, [taskId]: '' }));
       await refetch();
+      toast.success('Đã phê duyệt hoàn thành công việc!');
     } catch (error) {
       console.error('Không thể phê duyệt task:', error);
+      toast.error('Không thể phê duyệt công việc. Vui lòng thử lại.');
     }
   };
 

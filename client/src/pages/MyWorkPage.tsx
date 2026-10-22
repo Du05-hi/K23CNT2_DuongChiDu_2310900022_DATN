@@ -22,6 +22,8 @@ import {
 import { apiClient } from '@/api/apiClient';
 import DashboardAiResponse from '@/components/DashboardAiResponse';
 import TaskDetailsModal from '@/components/TaskDetailsModal';
+import { CountdownBadge } from '@/components/ui/CountdownBadge';
+import { formatDateTime } from '@/utils/deadline';
 import { useAuth } from '@/hooks/useAuth';
 import aiService from '@/services/aiService';
 import taskService, { type Task, type TaskStatus } from '@/services/taskService';
@@ -318,8 +320,8 @@ const MyWorkPage: React.FC = () => {
                           </span>
                         </div>
                         <div className="mt-3 flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-                          <span>Hạn: {formatDate(task.dueDate)}</span>
-                          <span className="font-semibold text-rose-600 dark:text-rose-300">{getDueCountdown(task.dueDate)}</span>
+                          <span>Hạn: {formatDateTime(task.dueDate)}</span>
+                          <CountdownBadge dueDate={task.dueDate} isCompleted={task.status === 'DONE'} />
                         </div>
                       </div>
                     ))
@@ -477,10 +479,9 @@ const MyWorkPage: React.FC = () => {
                           <div className="h-2.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
                             <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-emerald-400" style={{ width: `${task.progress ?? 0}%` }} />
                           </div>
-                          <div className="mt-3 flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+                          <div className="mt-3 flex items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
                             <span>Subtask: {task.completedSubtaskCount ?? 0}/{task.subtaskCount ?? task.subTasks?.length ?? 0}</span>
-                            <span>•</span>
-                            <span className={task.isOverdue ? 'text-rose-500' : 'text-emerald-500'}>{task.isOverdue ? 'Quá hạn' : getDueCountdown(task.dueDate)}</span>
+                            <CountdownBadge dueDate={task.dueDate} isCompleted={task.status === 'DONE'} />
                           </div>
                         </div>
 
@@ -558,9 +559,12 @@ const MyWorkPage: React.FC = () => {
                       <p className="font-semibold text-slate-800 dark:text-slate-100">{task.title}</p>
                       <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{task.project?.name} • {task.assignee?.name ?? 'Bạn'}</p>
                     </div>
-                    <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                      <span className={`rounded-full px-2 py-1 ${priorityStyles[task.priority] ?? priorityStyles.MEDIUM}`}>{formatPriority(task.priority)}</span>
-                      <span>{formatDate(task.dueDate)}</span>
+                    <div className="flex flex-col items-end gap-1 text-xs text-slate-500 dark:text-slate-400">
+                      <div className="flex items-center gap-2">
+                        <span className={`rounded-full px-2 py-1 ${priorityStyles[task.priority] ?? priorityStyles.MEDIUM}`}>{formatPriority(task.priority)}</span>
+                        <span>{formatDateTime(task.dueDate)}</span>
+                      </div>
+                      <CountdownBadge dueDate={task.dueDate} isCompleted={task.status === 'DONE'} />
                     </div>
                   </button>
                 ))

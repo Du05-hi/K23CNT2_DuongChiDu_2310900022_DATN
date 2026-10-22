@@ -32,7 +32,7 @@ export interface LayoutProps {
 
 const defaultUser: SidebarUser = {
   id: 'current-user-1',
-  fullName: 'Dương Chí Dư',
+  fullName: 'Dương Chí Du',
   email: 'duongchidu@taskflow.vn',
   role: 'ADMIN',
 };

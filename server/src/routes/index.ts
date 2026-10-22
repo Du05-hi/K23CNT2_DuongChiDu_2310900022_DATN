@@ -7,6 +7,7 @@ import kpiRoutes from './kpiRoutes';
 import notificationRoutes from './notificationRoutes';
 import userRoutes from './userRoutes';
 import activityRoutes from './activityRoutes';
+import calendarRoutes from './calendarRoutes';
 
 const router = express.Router();
 
@@ -18,5 +19,6 @@ router.use('/kpi', kpiRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/users', userRoutes);
 router.use('/activity', activityRoutes);
+router.use('/calendar', calendarRoutes);
 
 export default router;

@@ -87,7 +87,27 @@ export const ProfilePage: React.FC = () => {
     }
 
     try {
-      await updateProfile({ name: trimmedName, avatar: avatarPreview || undefined });
+      const updated = await updateProfile({ name: trimmedName, avatar: avatarPreview || undefined });
+      
+      // Đảm bảo localStorage và Custom Event được kích hoạt ngay lập tức
+      if (typeof window !== 'undefined') {
+        try {
+          const currentStored = JSON.parse(localStorage.getItem('user') || '{}');
+          const finalUser = {
+            ...currentStored,
+            ...updated,
+            name: trimmedName,
+            fullName: trimmedName,
+            avatar: avatarPreview || null,
+            avatarUrl: avatarPreview || null,
+          };
+          localStorage.setItem('user', JSON.stringify(finalUser));
+        } catch {
+          // fallback
+        }
+        window.dispatchEvent(new Event('user-profile-updated'));
+      }
+      
       toast.success('Đã cập nhật thông tin hồ sơ cá nhân thành công!');
     } catch {
       toast.error('Không thể cập nhật hồ sơ. Vui lòng thử lại.');
@@ -130,6 +150,21 @@ export const ProfilePage: React.FC = () => {
   // Avatar Selectors
   const handleSelectPredefinedAvatar = (url: string) => {
     setAvatarPreview(url);
+  };
+
+  const handleAvatarFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('Kích thước ảnh tối đa là 2MB.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setAvatarPreview(reader.result as string);
+      toast.success('Đã tải ảnh lên xem trước thành công!');
+    };
+    reader.readAsDataURL(file);
   };
 
   const initials = user?.name?.trim().charAt(0).toUpperCase() || 'U';
@@ -279,9 +314,9 @@ export const ProfilePage: React.FC = () => {
             {/* Avatar Selector Gallery */}
             <div>
               <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2">
-                Chọn ảnh đại diện xem trước (Avatar Preview)
+                Ảnh đại diện xem trước (Avatar Preview & Upload)
               </label>
-              <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3 mb-3">
                 {[
                   'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
                   'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150',
@@ -302,6 +337,30 @@ export const ProfilePage: React.FC = () => {
                     <img src={url} alt={`Avatar option ${i}`} className="h-full w-full object-cover" />
                   </button>
                 ))}
+              </div>
+
+              {/* Upload from PC or Input Custom URL */}
+              <div className="flex flex-col sm:flex-row items-center gap-3">
+                <label className="flex items-center gap-2 px-3.5 py-2 rounded-2xl border border-dashed border-indigo-300 dark:border-indigo-700 bg-indigo-50/50 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 text-xs font-bold hover:bg-indigo-100/50 transition cursor-pointer shrink-0">
+                  <Camera className="w-4 h-4" />
+                  <span>Tải ảnh lên từ máy tính</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleAvatarFileUpload}
+                    className="hidden"
+                  />
+                </label>
+
+                <div className="relative w-full">
+                  <input
+                    type="url"
+                    value={avatarPreview}
+                    onChange={(e) => setAvatarPreview(e.target.value)}
+                    placeholder="Hoặc dán đường dẫn ảnh đại diện (URL)..."
+                    className="w-full px-3.5 py-2 rounded-2xl bg-slate-100/80 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
               </div>
             </div>
 

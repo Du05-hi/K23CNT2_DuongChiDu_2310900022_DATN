@@ -118,6 +118,12 @@ export async function taskBreakdown(
   taskDescription: string = ''
 ): Promise<SubTaskSuggestion[]> {
   try {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      console.warn('[Gemini] Không có GEMINI_API_KEY, sử dụng fallback subtasks.');
+      return getFallbackSubtasks(taskTitle, taskDescription);
+    }
+
     const prompt = `
 Bạn là một chuyên gia quản lý dự án công nghệ thông tin xuất sắc.
 Hãy phân tích công việc sau và phân tách thành từ 3 đến tối đa 8 công việc con (sub-tasks) cụ thể, thực tế và khả thi.
@@ -196,15 +202,44 @@ export async function generateProgressSummary(
   projectName: string,
   tasks: TaskSummaryInput[]
 ): Promise<string> {
+  const normalizedTasks = tasks.map(normalizeTaskSummaryInput);
+  const safeProjectName = normalizeString(projectName, 'Dự án chưa có tên');
+  const total = normalizedTasks.length;
+  const completed = normalizedTasks.filter((t) => t.status === 'DONE').length;
+  const inProgress = normalizedTasks.filter((t) => t.status === 'IN_PROGRESS').length;
+  const review = normalizedTasks.filter((t) => t.status === 'REVIEW').length;
+  const todo = normalizedTasks.filter((t) => t.status === 'TODO').length;
+  const completionRate = total > 0 ? ((completed / total) * 100).toFixed(1) : '0';
+
+  const fallbackReport = `# BÁO CÁO TIẾN ĐỘ DỰ ÁN: ${safeProjectName.toUpperCase()}
+
+### 1. Tổng quan
+- Dự án hiện có **${total} công việc** đã được lập kế hoạch và phân bổ trên hệ thống.
+- Tỷ lệ hoàn thành công việc đạt **${completionRate}%** (${completed}/${total} tasks).
+
+### 2. Tiến độ chi tiết
+- **Hoàn thành (DONE):** ${completed} tasks.
+- **Đang thực hiện (IN PROGRESS):** ${inProgress} tasks.
+- **Chờ đánh giá/duyệt (REVIEW):** ${review} tasks.
+- **Chưa bắt đầu (TODO):** ${todo} tasks.
+
+### 3. Điểm mạnh
+- Quy trình bàn giao và cập nhật trạng thái trên bảng Kanban diễn ra liên tục, minh bạch.
+- Đội ngũ thành viên chủ động phối hợp giải quyết các đầu việc theo mốc thời gian.
+
+### 4. Cần cải thiện
+- Cần chú ý bám sát hạn chót các công việc có độ ưu tiên CAO (HIGH/URGENT).
+- Rà soát các đầu việc chưa gán người phụ trách để tránh gián đoạn tiến độ chung.
+
+### 5. Khuyến nghị
+- Ban quản lý duy trì họp tiến độ hàng tuần và tập trung dứt điểm các tác vụ đang ở bước Review.`;
+
   try {
-    const normalizedTasks = tasks.map(normalizeTaskSummaryInput);
-    const safeProjectName = normalizeString(projectName, 'Dự án chưa có tên');
-    const total = normalizedTasks.length;
-    const completed = normalizedTasks.filter((t) => t.status === 'DONE').length;
-    const inProgress = normalizedTasks.filter((t) => t.status === 'IN_PROGRESS').length;
-    const review = normalizedTasks.filter((t) => t.status === 'REVIEW').length;
-    const todo = normalizedTasks.filter((t) => t.status === 'TODO').length;
-    const completionRate = total > 0 ? ((completed / total) * 100).toFixed(1) : '0';
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      console.warn('[Gemini] Không có GEMINI_API_KEY, sinh báo cáo tiến độ nội bộ.');
+      return fallbackReport;
+    }
 
     const prompt = `
 Bạn là Giám đốc Dự án kiêm Chuyên gia Đánh giá Hiệu suất (KPI & Performance Lead).
@@ -271,9 +306,23 @@ export async function generatePersonalWorkInsights(
   userName: string,
   tasks: PersonalWorkInsightInput[]
 ): Promise<string> {
+  const total = tasks.length;
+  const completed = tasks.filter((t) => t.status === 'DONE').length;
+  const now = new Date();
+  const overdue = tasks.filter((t) => t.status !== 'DONE' && t.dueDate && new Date(t.dueDate) < now).length;
+  const fallbackInsights = `### Phân tích năng suất cho ${userName || 'bạn'}
+- **Khối lượng công việc:** Bạn hiện có tổng cộng **${total} tasks**, trong đó đã hoàn thành **${completed} tasks**.
+- **Cảnh báo tiến độ:** ${overdue > 0 ? `Có **${overdue} task quá hạn** cần ưu tiên hoàn tất sớm.` : 'Tất cả các task đều đang trong hạn xử lý tốt.'}
+- **Khuyến nghị hành động:** Tập trung dứt điểm các công việc có độ ưu tiên HIGH/URGENT trước, cập nhật trạng thái thường xuyên trên Kanban.`;
+
   try {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      console.warn('[Gemini] Không có GEMINI_API_KEY, sinh nhận xét năng suất nội bộ.');
+      return fallbackInsights;
+    }
+
     const normalizedTasks = tasks.map(normalizePersonalWorkInsightInput);
-    const now = new Date();
     const overdueTasks = normalizedTasks.filter(
       (task) => task.status !== 'DONE' && task.dueDate && new Date(task.dueDate) < now
     ).length;
@@ -446,14 +495,24 @@ Yêu cầu trả về kết quả dạng JSON ARRAY thuần túy (không kèm co
 export async function parseNaturalLanguageSearch(
   query: string
 ): Promise<ParsedNLQuery> {
+  const fallbackResult: ParsedNLQuery = {
+    keyword: normalizeString(query, 'công việc'),
+  };
+
   try {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      console.warn('[Gemini] Không có GEMINI_API_KEY, thực hiện tìm kiếm từ khóa cơ bản.');
+      return fallbackResult;
+    }
+
     const prompt = `
 Bạn là trợ lý AI thông minh phân tích câu truy vấn tìm kiếm công việc của người dùng bằng tiếng Việt.
 Hãy phân tích câu sau: "${normalizeString(query, 'công việc')}"
 
 Trích xuất thành đối tượng JSON có các trường sau (nếu câu nói không đề cập trường nào thì để null):
 {
-  "assigneeName": string hoặc null (ví dụ: "Nguyễn Văn A", "Du", "tôi", "Dương Chí Dự"),
+  "assigneeName": string hoặc null (ví dụ: "Nguyễn Văn A", "Du", "tôi", "Dương Chí Du"),
   "status": "TODO" | "IN_PROGRESS" | "REVIEW" | "DONE" hoặc null,
   "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT" hoặc null,
   "isPastDue": boolean hoặc null (true nếu người dùng tìm việc trễ hạn, quá hạn, trễ deadline),
@@ -474,5 +533,337 @@ Trích xuất thành đối tượng JSON có các trường sau (nếu câu nó
     return {
       keyword: normalizeString(query, 'công việc'),
     };
+  }
+}
+
+/**
+ * 5. Cấu trúc ngữ cảnh dữ liệu Live Database cho Trợ Lý AI
+ */
+export interface LiveDataContext {
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+  };
+  stats: {
+    totalProjects: number;
+    totalTasks: number;
+    completedTasks: number;
+    inProgressTasks: number;
+    reviewTasks: number;
+    todoTasks: number;
+    overdueTasks: number;
+    urgentTasks: number;
+    completionRate: number;
+    myTotalTasks: number;
+    myOverdueTasks: number;
+  };
+  projects: Array<{
+    id: string;
+    name: string;
+    status: string;
+    taskCount: number;
+    completedCount: number;
+    progress: number;
+  }>;
+  tasks: Array<{
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+    dueDate: string | null;
+    isOverdue: boolean;
+    assigneeName: string;
+    assigneeId: string | null;
+    projectId: string;
+    projectName: string;
+  }>;
+}
+
+/**
+ * Xử lý ý định thông minh nội bộ (Smart Intent Matching & Graceful Fallback)
+ * Đảm bảo 100% trả lời chính xác từ DB ngay cả khi không có kết nối Gemini API
+ */
+export function generateSmartFallbackResponse(query: string, context: LiveDataContext): string {
+  const q = (query || '').toLowerCase().trim();
+
+  // 1. Ý định: Task quá hạn / trễ hạn
+  if (q.includes('quá hạn') || q.includes('trễ hạn') || q.includes('overdue') || q.includes('muộn deadline')) {
+    const overdueTasks = context.tasks.filter((t) => t.isOverdue);
+    if (overdueTasks.length === 0) {
+      return `🎉 **Tuyệt vời! Hiện tại không có công việc nào bị quá hạn.**\n\nToàn bộ **${context.stats.totalTasks} công việc** trong các dự án của bạn đều đang bám sát tiến độ đề ra.`;
+    }
+
+    const taskLines = overdueTasks.map((t, idx) => {
+      const dateStr = t.dueDate ? new Date(t.dueDate).toLocaleDateString('vi-VN') : 'Không rõ';
+      return `${idx + 1}. [TASK: ${t.id} | ${t.title}] (${t.priority})\n   • **Dự án:** ${t.projectName}\n   • **Phụ trách:** ${t.assigneeName}\n   • **Hạn chót:** ${dateStr} (⚠️ *Đã trễ hạn*)`;
+    });
+
+    return `⚠️ **Phát hiện ${overdueTasks.length} công việc đã quá hạn cần xử lý gấp:**\n\n${taskLines.join('\n\n')}\n\n👉 *Khuyến nghị: Bạn có thể bấm vào từng task ở trên để xem chi tiết hoặc đôn đốc người phụ trách.*`;
+  }
+
+  // 2. Ý định: Việc cần làm (TODO)
+  if (q.includes('cần làm') || q.includes('to do') || q.includes('todo') || q.includes('chưa làm') || q.includes('chưa thực hiện')) {
+    const todoTasks = context.tasks.filter((t) => t.status === 'TODO');
+    if (todoTasks.length === 0) {
+      return `📋 **Hiện không có công việc nào ở trạng thái Cần làm (TODO).**\n\nTất cả các nhiệm vụ đã được khởi động triển khai hoặc đã hoàn tất.`;
+    }
+
+    const preview = todoTasks.slice(0, 8);
+    const taskLines = preview.map((t, idx) => {
+      const dateStr = t.dueDate ? new Date(t.dueDate).toLocaleDateString('vi-VN') : 'Chưa đặt hạn';
+      return `${idx + 1}. [TASK: ${t.id} | ${t.title}] [${t.priority}]\n   • **Dự án:** ${t.projectName} | **Phụ trách:** ${t.assigneeName} | **Hạn:** ${dateStr}`;
+    });
+
+    const moreText = todoTasks.length > 8 ? `\n\n*(và còn ${todoTasks.length - 8} công việc TODO khác trong danh mục)*` : '';
+
+    return `📋 **Danh sách ${todoTasks.length} công việc đang chờ thực hiện (TODO):**\n\n${taskLines.join('\n\n')}${moreText}\n\n👉 *Bạn có thể bấm vào thẻ công việc để mở modal chi tiết hoặc chuyển trạng thái sang In Progress.*`;
+  }
+
+  // 3. Ý định: Việc khẩn cấp (URGENT / HIGH)
+  if (q.includes('khẩn cấp') || q.includes('urgent') || q.includes('ưu tiên cao') || q.includes('cấp bách')) {
+    const urgentTasks = context.tasks.filter((t) => t.priority === 'URGENT' || t.priority === 'HIGH');
+    if (urgentTasks.length === 0) {
+      return `🔥 **Hiện tại không có công việc nào ở mức Khẩn cấp (URGENT) hoặc Ưu tiên cao.**\n\nKhối lượng công việc đang được kiểm soát ở mức độ ưu tiên trung bình và thấp.`;
+    }
+
+    const taskLines = urgentTasks.map((t, idx) => {
+      const dateStr = t.dueDate ? new Date(t.dueDate).toLocaleDateString('vi-VN') : 'Chưa đặt hạn';
+      return `${idx + 1}. [TASK: ${t.id} | ${t.title}] - **${t.priority}**\n   • **Trạng thái:** ${t.status}\n   • **Dự án:** ${t.projectName}\n   • **Phụ trách:** ${t.assigneeName}\n   • **Hạn chót:** ${dateStr}`;
+    });
+
+    return `🔥 **Danh sách ${urgentTasks.length} công việc Khẩn cấp & Ưu tiên cao:**\n\n${taskLines.join('\n\n')}\n\n👉 *Khuyến nghị ban quản lý và thành viên tập trung hoàn thành dứt điểm các đầu việc này trước.*`;
+  }
+
+  // 4. Ý định: Tiến độ dự án / Báo cáo tổng quan
+  if (q.includes('tiến độ') || q.includes('báo cáo') || q.includes('tổng quan') || q.includes('tỷ lệ') || q.includes('thống kê')) {
+    const projectLines = context.projects.map((p) => {
+      return `• **${p.name}**: Đạt **${p.progress}%** (${p.completedCount}/${p.taskCount} tasks hoàn thành - Trạng thái: *${p.status}*)`;
+    });
+
+    return `📊 **Báo cáo tiến độ tổng quan thời gian thực:**\n\n` +
+      `- **Tổng số dự án:** ${context.stats.totalProjects} dự án\n` +
+      `- **Tổng số công việc:** ${context.stats.totalTasks} tasks\n` +
+      `- **Tỷ lệ hoàn thành toàn hệ thống:** **${context.stats.completionRate}%** (${context.stats.completedTasks}/${context.stats.totalTasks} tasks Done)\n` +
+      `- **Đang thực hiện:** ${context.stats.inProgressTasks} | **Chờ kiểm thử:** ${context.stats.reviewTasks} | **Cần làm:** ${context.stats.todoTasks}\n` +
+      `- **Công việc quá hạn:** **${context.stats.overdueTasks}** tasks\n\n` +
+      `**Chi tiết tiến độ từng dự án:**\n${projectLines.join('\n')}\n\n` +
+      `👉 *Bạn có thể truy cập phân hệ Bảng Kanban của từng dự án để xem luồng công việc trực quan.*`;
+  }
+
+  // 5. Ý định: Việc của tôi
+  if (q.includes('của tôi') || q.includes('giao cho tôi') || q.includes('phụ trách của tôi') || q.includes('nhiệm vụ của tôi')) {
+    const myTasks = context.tasks.filter((t) => t.assigneeId === context.user.id);
+    if (myTasks.length === 0) {
+      return `👤 Chào **${context.user.name}**, hiện tại bạn chưa được phân công nhiệm vụ cụ thể nào trong hệ thống.`;
+    }
+
+    const taskLines = myTasks.map((t, idx) => {
+      const dateStr = t.dueDate ? new Date(t.dueDate).toLocaleDateString('vi-VN') : 'Không deadline';
+      const overdueTag = t.isOverdue ? ' (⚠️ *Quá hạn*)' : '';
+      return `${idx + 1}. [TASK: ${t.id} | ${t.title}] (${t.status} - ${t.priority})\n   • **Dự án:** ${t.projectName}\n   • **Hạn:** ${dateStr}${overdueTag}`;
+    });
+
+    return `👤 Chào **${context.user.name}**, bạn đang phụ trách **${myTasks.length} công việc**:\n\n${taskLines.join('\n\n')}\n\n👉 *Bấm vào bất kỳ thẻ công việc nào để mở chi tiết cập nhật tiến độ!*`;
+  }
+
+  // 6. Tìm kiếm theo từ khóa tổng quát
+  const matched = context.tasks.filter((t) => {
+    return (
+      t.title.toLowerCase().includes(q) ||
+      t.projectName.toLowerCase().includes(q) ||
+      t.assigneeName.toLowerCase().includes(q)
+    );
+  });
+
+  if (matched.length > 0) {
+    const preview = matched.slice(0, 6);
+    const taskLines = preview.map((t, idx) => {
+      const dateStr = t.dueDate ? new Date(t.dueDate).toLocaleDateString('vi-VN') : 'Chưa đặt hạn';
+      return `${idx + 1}. [TASK: ${t.id} | ${t.title}] (${t.status})\n   • **Dự án:** ${t.projectName} | **Phụ trách:** ${t.assigneeName} | **Hạn:** ${dateStr}`;
+    });
+
+    const more = matched.length > 6 ? `\n\n*(và còn ${matched.length - 6} công việc khác trùng khớp)*` : '';
+
+    return `Dựa trên dữ liệu thời gian thực của hệ thống, tôi tìm thấy **${matched.length} công việc** phù hợp:\n\n${taskLines.join('\n\n')}${more}`;
+  }
+
+  // Phản hồi mặc định khi không tìm thấy kết quả khớp
+  return `Tôi đã đối chiếu dữ liệu live từ hệ thống gồm **${context.stats.totalTasks} công việc** thuộc **${context.stats.totalProjects} dự án**, nhưng chưa tìm thấy dữ liệu khớp chính xác với yêu cầu: *"${query}"*.\n\n` +
+    `💡 **Gợi ý bạn có thể hỏi tôi:**\n` +
+    `• *"Tìm các công việc đang quá hạn"* (hoặc click chip **⚠️ Việc quá hạn**)\n` +
+    `• *"Danh sách việc cần làm"* (hoặc click chip **📋 Việc cần làm (TODO)**)\n` +
+    `• *"Những việc khẩn cấp"* (hoặc click chip **🔥 Việc khẩn cấp (URGENT)**)\n` +
+    `• *"Báo cáo tiến độ các dự án"* hoặc tìm theo tên người phụ trách!`;
+}
+
+/**
+ * 6. Trò chuyện và phân tích dữ liệu dự án thời gian thực qua Gemini AI (Live Data-Aware Chat)
+ */
+export async function askGeminiWithLiveData(
+  query: string,
+  context: LiveDataContext,
+  history?: Array<{ role: 'user' | 'model'; text: string }>
+): Promise<string> {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    console.warn('[Gemini] Không có GEMINI_API_KEY, chuyển sang xử lý ý định thông minh nội bộ.');
+    return generateSmartFallbackResponse(query, context);
+  }
+
+  try {
+    const systemInstruction = `
+Bạn là Trợ lý Dữ liệu Live nội bộ của TaskFlow AI trong hệ thống quản trị dự án & công việc doanh nghiệp.
+Người dùng đang trò chuyện: ${context.user.name} (Email: ${context.user.email}, Quyền: ${context.user.role}).
+
+DƯỚI ĐÂY LÀ BỘ DỮ LIỆU THỜI GIAN THỰC (LIVE DATA) ĐƯỢC TRÍCH XUẤT TRỰC TIẾP TỪ DATABASE PRISMA:
+==================================================
+TỔNG QUAN HỆ THỐNG:
+- Tổng số dự án: ${context.stats.totalProjects}
+- Tổng số công việc: ${context.stats.totalTasks}
+- Đã hoàn thành: ${context.stats.completedTasks}
+- Đang thực hiện: ${context.stats.inProgressTasks}
+- Chờ duyệt (Review): ${context.stats.reviewTasks}
+- Cần làm (TODO): ${context.stats.todoTasks}
+- Tỷ lệ hoàn thành toàn hệ thống: ${context.stats.completionRate}%
+- Số công việc quá hạn: ${context.stats.overdueTasks}
+- Số công việc khẩn cấp (URGENT): ${context.stats.urgentTasks}
+- Công việc của ${context.user.name}: ${context.stats.myTotalTasks} task (quá hạn: ${context.stats.myOverdueTasks})
+
+DANH SÁCH DỰ ÁN:
+${JSON.stringify(context.projects, null, 2)}
+
+DANH SÁCH CÔNG VIỆC:
+${JSON.stringify(context.tasks, null, 2)}
+==================================================
+
+QUY TẮC PHẢN HỒI BẮT BUỘC:
+1. Dựa vào bộ dữ liệu thời gian thực trên để trả lời câu hỏi của người dùng một cách chính xác, ngắn gọn, có cấu trúc bullet point rõ ràng. Tuyệt đối không tự suy đoán thông tin không có trong dữ liệu.
+2. Nếu người dùng hỏi về task quá hạn, hãy liệt kê đúng tên task, deadline, tên người phụ trách và tên dự án.
+3. Nếu người dùng hỏi về tiến độ, hãy trích dẫn đúng tỷ lệ % và số lượng task hoàn thành / tổng số.
+4. ĐẶC BIỆT BẮT BUỘC: Bất cứ khi nào nhắc đến một công việc cụ thể, bạn PHẢI bọc trong cú pháp [TASK: <taskId> | <taskTitle>] (ví dụ: [TASK: 12345 | Thiết kế trang chủ]). Giao diện Frontend sẽ tự động chuyển cú pháp này thành một thẻ Badge tương tác để người dùng click mở modal chi tiết hoặc chuyển tới Kanban.
+5. Sử dụng tiếng Việt thân thiện, chuyên nghiệp, rõ ràng.
+`;
+
+    const model = getModelForRequest('gemini-1.5-flash', {
+      temperature: 0.2,
+      maxOutputTokens: 1500,
+    });
+
+    const prompt = `${systemInstruction}\n\nCÂU HỎI CỦA NGƯỜI DÙNG: "${query}"\n\nHÃY TRẢ LỜI:`;
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    if (!text || text.trim() === '') {
+      return generateSmartFallbackResponse(query, context);
+    }
+    return text.trim();
+  } catch (error: any) {
+    console.warn('[Gemini][askGeminiWithLiveData] Lỗi gọi Gemini API, kích hoạt Smart Fallback:', error?.message);
+    return generateSmartFallbackResponse(query, context);
+  }
+}
+
+export interface KpiPerformanceInput {
+  userName: string;
+  userEmail?: string;
+  departmentName?: string;
+  role?: string;
+  period: string;
+  totalScore: number;
+  rank: string;
+  completedTasksCount: number;
+  totalTasksCount: number;
+  completionRate: number;
+  onTimeTasksCount: number;
+  onTimeRate: number;
+  taskCompletionScore: number;
+  onTimeScore: number;
+  bonusScore: number;
+}
+
+/**
+ * Fallback tạo nhận xét tự động theo công thức và chỉ số KPI thực tế nếu AI bận hoặc thiếu API key
+ */
+export function generateKpiFallbackReview(input: KpiPerformanceInput): string {
+  const compRate = input.completionRate ?? 0;
+  const onTimeRate = input.onTimeRate ?? 0;
+  const rank = input.rank || 'B';
+  const totalTasks = input.totalTasksCount || input.completedTasksCount || 1;
+
+  if (rank === 'S' || input.totalScore >= 90) {
+    return `🌟 Điểm sáng nổi bật: Hiệu suất làm việc vượt bậc với tỷ lệ hoàn thành ${compRate}% và đúng hạn ${onTimeRate}%, xuất sắc đạt Hạng S (${input.totalScore} điểm).
+⚡ Điểm cần cải thiện: Tiếp tục phát huy thế mạnh chuyên môn, chủ động chia sẻ kinh nghiệm và hỗ trợ các thành viên trong nhóm xử lý các đầu việc phức tạp.
+🚀 Lộ trình phát triển: Định hướng đảm nhận vai trò Trưởng nhóm chuyên môn (Team Lead) hoặc dẫn dắt các sáng kiến dự án trọng điểm tiếp theo.`;
+  }
+  if (rank === 'A' || input.totalScore >= 80) {
+    return `🌟 Điểm sáng nổi bật: Năng suất công việc rất tốt, hoàn tất ${input.completedTasksCount}/${totalTasks} nhiệm vụ (${compRate}%), đảm bảo tiến độ bàn giao (${onTimeRate}% đúng hạn).
+⚡ Điểm cần cải thiện: Tối ưu hóa khâu xử lý công việc phát sinh và tích cực phối hợp liên bộ phận để duy trì mức điểm thưởng tối đa.
+🚀 Lộ trình phát triển: Sẵn sàng bứt phá lên Hạng S trong kỳ tới thông qua việc rút ngắn thời gian hoàn thành và nâng cao chất lượng bàn giao.`;
+  }
+  if (rank === 'B' || input.totalScore >= 65) {
+    return `🌟 Điểm sáng nổi bật: Duy trì tiến độ công việc ổn định (${input.completedTasksCount} nhiệm vụ hoàn tất), tinh thần trách nhiệm với dự án tốt.
+⚡ Điểm cần cải thiện: Cần nâng cao tỷ lệ hoàn thành đúng hạn (${onTimeRate}%) và tránh tình trạng dồn ứ công việc vào các ngày sát hạn chót.
+🚀 Lộ trình phát triển: Áp dụng phương pháp phân bổ thời gian (Time-blocking) và phối hợp sớm với quản lý để nâng hạng lên Rank A.`;
+  }
+  if (rank === 'C' || input.totalScore >= 50) {
+    return `🌟 Điểm sáng nổi bật: Đã nỗ lực hoàn thành các nhiệm vụ cơ bản (${input.completedTasksCount} task) được giao trong kỳ đánh giá.
+⚡ Điểm cần cải thiện: Tỷ lệ hoàn thành (${compRate}%) và đúng hạn (${onTimeRate}%) còn thấp so với yêu cầu; cần tập trung giải quyết các việc ưu tiên cao.
+🚀 Lộ trình phát triển: Cần lập kế hoạch công việc tuần chi tiết, chủ động trao đổi khi gặp vướng mắc kỹ thuật để cải thiện hiệu suất.`;
+  }
+  return `🌟 Điểm sáng nổi bật: Đã tiếp nhận và bắt đầu thực hiện các đầu việc được giao trong kỳ.
+⚡ Điểm cần cải thiện: Tỷ lệ hoàn thành và đúng hạn (${onTimeRate}%) cần cải thiện khẩn trương; tránh để nhiệm vụ bị trễ hạn kéo dài ảnh hưởng dự án.
+🚀 Lộ trình phát triển: Tham gia buổi kèm cặp 1-1 với Quản lý dự án để rà soát quy trình làm việc và thiết lập lại mục tiêu rõ ràng hơn.`;
+}
+
+/**
+ * 7. Sinh nhận xét đánh giá hiệu suất cá nhân KPI chuẩn nhân sự thông qua Gemini AI
+ */
+export async function generateKpiPerformanceReview(input: KpiPerformanceInput): Promise<string> {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    return generateKpiFallbackReview(input);
+  }
+
+  try {
+    const prompt = `
+Bạn là Trưởng phòng Nhân sự cấp cao kiêm Cố vấn Hiệu suất nội bộ của hệ thống quản lý TaskFlow.
+Hãy phân tích bộ chỉ số KPI sau đây của nhân sự và viết một bản nhận xét hiệu suất cô đọng, chuẩn mực:
+
+THÔNG TIN NHÂN SỰ & CHỈ SỐ KPI:
+- Họ tên: ${input.userName}
+- Email: ${input.userEmail || 'Chưa cập nhật'}
+- Bộ phận: ${input.departmentName || 'Chưa phân bổ'}
+- Vị trí / Vai trò: ${input.role || 'Nhân viên'}
+- Kỳ đánh giá: ${input.period}
+- Tổng điểm KPI: ${input.totalScore}/100 điểm
+- Xếp loại Rank: Hạng ${input.rank}
+- Công việc hoàn thành: ${input.completedTasksCount}/${input.totalTasksCount} việc (Tỷ lệ: ${input.completionRate}%, Điểm đạt: ${input.taskCompletionScore}/40đ)
+- Công việc đúng hạn: ${input.onTimeTasksCount}/${input.completedTasksCount || 1} việc (Tỷ lệ: ${input.onTimeRate}%, Điểm đạt: ${input.onTimeScore}/40đ)
+- Điểm thưởng Manager: +${input.bonusScore}/20đ
+
+YÊU CẦU ĐẦU RA BẮT BUỘC:
+Viết bản nhận xét ngắn gọn, đúng 3-4 dòng / đoạn súc tích gồm chính xác 3 phần sau:
+🌟 Điểm sáng nổi bật: [Nêu ưu điểm lớn nhất dựa trên tỷ lệ hoàn thành/đúng hạn/điểm thưởng thực tế]
+⚡ Điểm cần cải thiện: [Nêu khía cạnh cần khắc phục hoặc lưu ý để nâng cao chất lượng]
+🚀 Lộ trình phát triển: [Định hướng cụ thể, khích lệ bứt phá trong kỳ tiếp theo]
+
+Văn phong chuẩn mực HR, tích cực, mang tính khích lệ và định hướng hành động. Không chào hỏi dư thừa ngoài 3 phần trên.
+`;
+
+    const model = getModelForRequest('gemini-1.5-flash', {
+      temperature: 0.3,
+      maxOutputTokens: 600,
+    });
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    if (!text || text.trim() === '') {
+      return generateKpiFallbackReview(input);
+    }
+    return text.trim();
+  } catch (error: any) {
+    console.warn('[Gemini][generateKpiPerformanceReview] Lỗi gọi Gemini API, sử dụng Smart Fallback:', error?.message);
+    return generateKpiFallbackReview(input);
   }
 }

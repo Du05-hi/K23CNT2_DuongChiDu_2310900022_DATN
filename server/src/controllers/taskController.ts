@@ -67,6 +67,37 @@ async function updateTemporaryKpiOnTaskDone(assigneeId: string, dueDate: Date | 
 }
 
 /**
+ * Tự động đồng bộ thành viên dự án:
+ * Nếu nhân viên được giao task (assigneeId) chưa có trong ProjectMember,
+ * tự động ghi nhận nhân viên đó là thành viên dự án (role MEMBER).
+ */
+export async function ensureProjectMember(projectId: string, userId?: string | null): Promise<void> {
+  if (!projectId || !userId) return;
+  try {
+    const existing = await prisma.projectMember.findUnique({
+      where: {
+        projectId_userId: {
+          projectId,
+          userId,
+        },
+      },
+    });
+
+    if (!existing) {
+      await prisma.projectMember.create({
+        data: {
+          projectId,
+          userId,
+          role: 'MEMBER',
+        },
+      });
+    }
+  } catch (err: any) {
+    console.error(`Lỗi tự động đồng bộ thành viên dự án ${projectId} cho user ${userId}:`, err?.message || err);
+  }
+}
+
+/**
  * 1. Tạo task mới, tính position max+1, emit socket 'task:created', log activity, gửi notification
  */
 export const createTask = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
@@ -147,14 +178,19 @@ export const createTask = async (req: AuthenticatedRequest, res: Response): Prom
       metadata: { projectId, taskId: task.id, assigneeId: task.assigneeId },
     });
 
-    // Nếu có assignee và không phải chính người tạo, gửi notification
+    // Tự động đồng bộ thành viên dự án nếu task có assignee
+    if (assigneeId) {
+      await ensureProjectMember(projectId, assigneeId);
+    }
+
+    // Nếu có assignee và không phải chính người tạo, gửi notification kèm relatedId projectId:taskId
     if (assigneeId && assigneeId !== userId) {
       const notif = await createNotification({
         userId: assigneeId,
         type: 'TASK_ASSIGNED',
         title: 'Công việc mới được giao',
         message: `${req.user?.name || 'Một thành viên'} đã giao công việc "${task.title}" cho bạn.`,
-        relatedId: task.id,
+        relatedId: `${projectId}:${task.id}`,
       });
       sendRealtimeNotification(io, assigneeId, notif);
     }
@@ -779,6 +815,11 @@ export const updateTask = async (req: AuthenticatedRequest, res: Response): Prom
       }
     }
 
+    // Nếu assignee được cập nhật/thay đổi, tự động đồng bộ thành viên dự án
+    if (assigneeId) {
+      await ensureProjectMember(updatedTask.projectId, assigneeId);
+    }
+
     // Nếu assignee thay đổi
     if (assigneeId && assigneeId !== currentTask.assigneeId && assigneeId !== userId) {
       const notif = await createNotification({
@@ -786,7 +827,7 @@ export const updateTask = async (req: AuthenticatedRequest, res: Response): Prom
         type: 'TASK_ASSIGNED',
         title: 'Công việc mới được giao',
         message: `Bạn vừa được giao công việc "${updatedTask.title}".`,
-        relatedId: updatedTask.id,
+        relatedId: `${updatedTask.projectId}:${updatedTask.id}`,
       });
       sendRealtimeNotification(io, assigneeId, notif);
     }
@@ -838,6 +879,10 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
     }
 
     const isTransitionToDone = status === 'DONE' && currentTask.status !== 'DONE';
+
+    if (currentTask.assigneeId) {
+      void ensureProjectMember(currentTask.projectId, currentTask.assigneeId);
+    }
 
     const updatedTask = await prisma.task.update({
       where: { id },
@@ -1299,6 +1344,98 @@ export const deleteSubTask = async (req: AuthenticatedRequest, res: Response): P
     res.status(500).json({
       success: false,
       message: 'Lỗi máy chủ khi xóa công việc con.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Cập nhật hạn chót (deadline / dueDate) của công việc (Hỗ trợ kéo thả trên Calendar).
+ * PATCH /api/tasks/:id/deadline & PUT /api/tasks/:id/deadline
+ */
+export const updateTaskDeadline = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { dueDate } = req.body;
+    const userId = req.user?.id;
+
+    if (!dueDate) {
+      res.status(400).json({ success: false, message: 'Vui lòng cung cấp hạn chót mới (dueDate).' });
+      return;
+    }
+
+    const currentTask = await prisma.task.findUnique({
+      where: { id },
+      include: {
+        project: { select: { id: true, name: true, createdById: true } },
+      },
+    });
+
+    if (!currentTask) {
+      res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
+      return;
+    }
+
+    // Quyền: Admin, Quản lý dự án, Người được giao việc, hoặc Người tạo dự án
+    const canManage = req.user ? await canManageProject(req.user, currentTask.projectId) : false;
+    const isAssignee = currentTask.assigneeId === userId;
+    const isCreator = currentTask.project.createdById === userId;
+
+    if (!canManage && !isAssignee && !isCreator) {
+      res.status(403).json({ success: false, message: 'Bạn không có quyền dời hạn chót công việc này.' });
+      return;
+    }
+
+    const newDueDate = new Date(dueDate);
+    if (isNaN(newDueDate.getTime())) {
+      res.status(400).json({ success: false, message: 'Định dạng ngày hạn chót không hợp lệ.' });
+      return;
+    }
+
+    const updatedTask = await prisma.task.update({
+      where: { id },
+      data: { dueDate: newDueDate },
+      include: {
+        assignee: { select: { id: true, name: true, email: true, avatar: true } },
+        project: { select: { id: true, name: true } },
+      },
+    });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`project:${updatedTask.projectId}`).emit('task_updated', {
+        projectId: updatedTask.projectId,
+        task: updatedTask,
+        movedBy: userId,
+      });
+      io.to(`project:${updatedTask.projectId}`).emit('task:updated', updatedTask);
+    }
+
+    if (userId) {
+      await logActivity({
+        userId,
+        action: 'TASK_UPDATED',
+        entityType: 'TASK',
+        entityId: id,
+        description: `Dời hạn chót công việc "${updatedTask.title}" sang ngày ${newDueDate.toLocaleDateString('vi-VN')}`,
+        metadata: {
+          projectId: updatedTask.projectId,
+          oldDueDate: currentTask.dueDate,
+          newDueDate: updatedTask.dueDate,
+        },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Cập nhật hạn chót công việc thành công.',
+      data: updatedTask,
+    });
+  } catch (error: any) {
+    console.error('Lỗi updateTaskDeadline:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi cập nhật hạn chót công việc.',
       error: error.message,
     });
   }

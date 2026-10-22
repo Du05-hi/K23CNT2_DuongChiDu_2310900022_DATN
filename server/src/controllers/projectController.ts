@@ -187,31 +187,42 @@ export const getAllProjects = async (req: AuthenticatedRequest, res: Response): 
       whereClause.departmentId = String(departmentId);
     }
 
+    // DỌN DẸP & ẨN DỰ ÁN HỆ THỐNG CÁ NHÂN:
+    // Chỉ trả về các dự án thực tế do người dùng chủ động tạo, ẩn toàn bộ các dự án phục vụ ghi chú lịch cá nhân
+    const excludePersonalProject = {
+      NOT: {
+        name: 'Công việc cá nhân & Lịch hẹn',
+      },
+    };
+
+    whereClause.AND = [
+      ...(whereClause.AND || []),
+      excludePersonalProject,
+    ];
+
     // Phân quyền theo Role
     if (user.role === 'ADMIN') {
-      // ADMIN thấy tất cả
-    } else if (user.role === 'MANAGER') {
-      // MANAGER thấy projects trong phòng ban của mình HOẶC projects mình tham gia/tạo
-      whereClause.AND = [
-        ...(whereClause.AND || []),
-        {
-          OR: [
-            user.departmentId ? { departmentId: user.departmentId } : undefined,
-            { createdById: user.id },
-            { members: { some: { userId: user.id } } },
-          ].filter(Boolean),
-        },
-      ];
+      // ADMIN thấy tất cả các dự án trong hệ thống
     } else {
-      // EMPLOYEE chỉ thấy dự án mình là member hoặc creator
+      // MANAGER & EMPLOYEE thấy dự án nếu:
+      // 1. Là người tạo dự án (createdById === user.id)
+      // 2. Là thành viên dự án (members có chứa user.id)
+      // 3. Có công việc được giao trong dự án đó (tasks có assigneeId === user.id)
+      // 4. Nếu là MANAGER có phòng ban: thấy dự án thuộc phòng ban của mình
+      const orConditions: any[] = [
+        { createdById: user.id },
+        { members: { some: { userId: user.id } } },
+        { tasks: { some: { assigneeId: user.id } } },
+      ];
+
+      if (user.role === 'MANAGER' && user.departmentId) {
+        orConditions.push({ departmentId: user.departmentId });
+      }
+
       whereClause.AND = [
         ...(whereClause.AND || []),
         {
-          OR: [
-            { createdById: user.id },
-            { members: { some: { userId: user.id } } },
-            { tasks: { some: { assigneeId: user.id } } },
-          ],
+          OR: orConditions,
         },
       ];
     }

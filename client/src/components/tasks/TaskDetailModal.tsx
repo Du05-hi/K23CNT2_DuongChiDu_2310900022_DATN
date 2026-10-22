@@ -36,6 +36,8 @@ import Avatar from '../ui/Avatar';
 import Badge from '../ui/Badge';
 import { getSocket } from '../../socket';
 import taskService from '../../services/taskService';
+import { toDatetimeLocalString, fromDatetimeLocalToIso } from '../../utils/deadline';
+import CountdownBadge from '../ui/CountdownBadge';
 
 export interface TaskDetailModalProps {
   task: Task | null;
@@ -90,7 +92,7 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
       setStatus(task.status || 'TODO');
       setPriority(task.priority || 'MEDIUM');
       setAssigneeId(task.assigneeId || '');
-      setDueDate(task.dueDate ? task.dueDate.split('T')[0] : '');
+      setDueDate(task.dueDate ? toDatetimeLocalString(task.dueDate) : '');
       setEstimatedHours(task.estimatedHours || 0);
       setActualHours(task.actualHours || 0);
       setSubTasks(task.subTasks ? [...task.subTasks] : []);
@@ -270,7 +272,7 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
         priority,
         assigneeId: assigneeId || undefined,
         assignee: selectedAssignee,
-        dueDate: dueDate ? new Date(dueDate).toISOString() : undefined,
+        dueDate: dueDate ? fromDatetimeLocalToIso(dueDate) || undefined : undefined,
         estimatedHours: Number(estimatedHours),
         actualHours: Number(actualHours),
         subTasks,
@@ -520,13 +522,18 @@ export const TaskDetailModal: React.FC<TaskDetailModalProps> = ({
                       <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
                         Hạn chót (Due date)
                       </label>
-                      <div className="relative">
+                      <div className="space-y-1.5">
                         <input
-                          type="date"
+                          type="datetime-local"
                           value={dueDate}
                           onChange={(e) => setDueDate(e.target.value)}
                           className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-medium text-slate-800 dark:text-slate-200 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                         />
+                        {dueDate && (
+                          <div className="pt-0.5">
+                            <CountdownBadge dueDate={dueDate} isCompleted={status === 'DONE'} />
+                          </div>
+                        )}
                       </div>
                     </div>
 

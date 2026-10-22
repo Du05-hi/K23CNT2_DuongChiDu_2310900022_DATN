@@ -4,6 +4,8 @@ import { Calendar, CheckSquare, MessageSquare, Paperclip, AlertCircle } from 'lu
 import { Task, TaskPriority, TaskStatus } from '../../services/taskService';
 import Avatar from '../ui/Avatar';
 import Badge from '../ui/Badge';
+import { formatDateTime } from '../../utils/deadline';
+import CountdownBadge from '../ui/CountdownBadge';
 
 export interface TaskCardProps {
   task: Task;
@@ -145,41 +147,46 @@ export const TaskCard: React.FC<TaskCardProps> = ({
           </div>
 
           {/* Right meta icons */}
-          <div className="flex items-center gap-3 text-slate-500 dark:text-slate-400">
-            {/* Due date */}
+          <div className="flex flex-col items-end gap-1.5 text-slate-500 dark:text-slate-400">
+            {/* Due date & Countdown */}
             {task.dueDate && (
-              <span
-                className={`inline-flex items-center gap-1 text-[11px] font-medium ${
-                  isOverdue
-                    ? 'text-rose-600 dark:text-rose-400 font-semibold'
-                    : 'text-slate-500 dark:text-slate-400'
-                }`}
-                title={isOverdue ? 'Quá hạn!' : `Hạn chót: ${task.dueDate}`}
-              >
-                {isOverdue ? (
-                  <AlertCircle className="w-3.5 h-3.5 text-rose-500" />
-                ) : (
-                  <Calendar className="w-3.5 h-3.5" />
-                )}
-                {formatDueDate(task.dueDate)}
-              </span>
+              <div className="flex flex-col items-end gap-1">
+                <span
+                  className={`inline-flex items-center gap-1 text-[11px] font-medium ${
+                    isOverdue
+                      ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                  title={isOverdue ? 'Quá hạn!' : `Hạn chót: ${task.dueDate}`}
+                >
+                  {isOverdue ? (
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                  ) : (
+                    <Calendar className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  {formatDateTime(task.dueDate)}
+                </span>
+                <CountdownBadge dueDate={task.dueDate} isCompleted={task.status === 'DONE'} />
+              </div>
             )}
 
-            {/* Attachments */}
-            {attachmentsCount > 0 && (
-              <span className="inline-flex items-center gap-0.5 text-[11px]" title={`${attachmentsCount} đính kèm`}>
-                <Paperclip className="w-3.5 h-3.5" />
-                <span>{attachmentsCount}</span>
-              </span>
-            )}
+            <div className="flex items-center gap-3">
+              {/* Attachments */}
+              {attachmentsCount > 0 && (
+                <span className="inline-flex items-center gap-0.5 text-[11px]" title={`${attachmentsCount} đính kèm`}>
+                  <Paperclip className="w-3.5 h-3.5" />
+                  <span>{attachmentsCount}</span>
+                </span>
+              )}
 
-            {/* Comments */}
-            {commentsCount > 0 && (
-              <span className="inline-flex items-center gap-0.5 text-[11px]" title={`${commentsCount} bình luận`}>
-                <MessageSquare className="w-3.5 h-3.5" />
-                <span>{commentsCount}</span>
-              </span>
-            )}
+              {/* Comments */}
+              {commentsCount > 0 && (
+                <span className="inline-flex items-center gap-0.5 text-[11px]" title={`${commentsCount} bình luận`}>
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>{commentsCount}</span>
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </div>

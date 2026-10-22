@@ -10,12 +10,26 @@ interface AuthState {
   error: string | null;
 }
 
+const normalizeUser = (user: User): User => {
+  const name = user.name || user.fullName || '';
+  const fullName = user.fullName || user.name || '';
+  const avatar = user.avatar || user.avatarUrl || null;
+  const avatarUrl = user.avatarUrl || user.avatar || null;
+  return {
+    ...user,
+    name,
+    fullName,
+    avatar,
+    avatarUrl,
+  };
+};
+
 const readStoredUser = (): User | null => {
   if (typeof window === 'undefined') return null;
 
   try {
     const user = localStorage.getItem('user');
-    return user ? (JSON.parse(user) as User) : null;
+    return user ? normalizeUser(JSON.parse(user) as User) : null;
   } catch {
     localStorage.removeItem('user');
     return null;
@@ -40,28 +54,31 @@ const authSlice = createSlice({
   initialState,
   reducers: {
     setUser: (state, action: PayloadAction<User>) => {
-      state.user = action.payload;
+      const normalized = normalizeUser(action.payload);
+      state.user = normalized;
       state.isAuthenticated = true;
-      localStorage.setItem('user', JSON.stringify(action.payload));
+      localStorage.setItem('user', JSON.stringify(normalized));
     },
     setCredentials: (
       state,
       action: PayloadAction<{ user: User; accessToken: string; refreshToken?: string }>
     ) => {
-      state.user = action.payload.user;
+      const normalized = normalizeUser(action.payload.user);
+      state.user = normalized;
       state.accessToken = action.payload.accessToken;
       state.isAuthenticated = true;
       state.error = null;
       localStorage.setItem('accessToken', action.payload.accessToken);
       localStorage.setItem('token', action.payload.accessToken);
-      localStorage.setItem('user', JSON.stringify(action.payload.user));
+      localStorage.setItem('user', JSON.stringify(normalized));
       if (action.payload.refreshToken) {
         localStorage.setItem('refreshToken', action.payload.refreshToken);
       }
     },
     updateUser: (state, action: PayloadAction<User>) => {
-      state.user = action.payload;
-      localStorage.setItem('user', JSON.stringify(action.payload));
+      const normalized = normalizeUser(action.payload);
+      state.user = normalized;
+      localStorage.setItem('user', JSON.stringify(normalized));
     },
     setLoading: (state, action: PayloadAction<boolean>) => {
       state.isLoading = action.payload;

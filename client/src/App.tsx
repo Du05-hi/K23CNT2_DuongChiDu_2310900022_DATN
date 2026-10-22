@@ -13,6 +13,7 @@ import ProjectsPage from './pages/ProjectsPage';
 import KanbanPage from './pages/KanbanPage';
 import KpiPage from './pages/KpiPage';
 import AIAssistantPage from './pages/AIAssistantPage';
+import CalendarPage from './pages/CalendarPage';
 import AdminPage from './pages/AdminPage';
 import ProfilePage from './pages/ProfilePage';
 import OAuthCallbackPage from './pages/OAuthCallbackPage';
@@ -51,6 +52,7 @@ export const App: React.FC = () => {
           <Route path="/dashboard" element={<Navigate to={homePath} replace />} />
           <Route path="/projects" element={<ProjectsPage />} />
           <Route path="/projects/:id/kanban" element={<KanbanPage />} />
+          <Route path="/calendar" element={<CalendarPage />} />
           <Route path="/kpi" element={<KpiPage />} />
           <Route path="/ai-assistant" element={<AIAssistantPage />} />
           <Route path="/profile" element={<ProfilePage />} />

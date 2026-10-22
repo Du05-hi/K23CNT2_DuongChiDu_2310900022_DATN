@@ -3,6 +3,8 @@ import ExcelJS from 'exceljs';
 import { prisma } from '../config/prisma';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 import { logActivity } from '../services/activityLogService';
+import { createNotification, sendRealtimeNotification } from '../services/notificationService';
+import { generateKpiPerformanceReview } from '../services/geminiService';
 
 /**
  * 0. Lấy KPI cá nhân của user đang đăng nhập
@@ -134,102 +136,220 @@ export const getMyKpi = async (req: AuthenticatedRequest, res: Response): Promis
 };
 
 /**
- * Hàm phụ trợ xác định hạng rank dựa trên tổng điểm
+ * Hàm phụ trợ xác định hạng rank chữ đơn (S, A, B, C, D) chuẩn quốc tế
+ */
+export function determineKpiRank(totalScore: number): 'S' | 'A' | 'B' | 'C' | 'D' {
+  if (totalScore >= 90) return 'S';
+  if (totalScore >= 80) return 'A';
+  if (totalScore >= 65) return 'B';
+  if (totalScore >= 50) return 'C';
+  return 'D';
+}
+
+/**
+ * Hàm phụ trợ xác định hạng rank dựa trên tổng điểm (tương thích ngược)
  */
 function determineRank(totalScore: number): string {
-  if (totalScore >= 90) return 'A (Xuất sắc)';
-  if (totalScore >= 75) return 'B (Tốt)';
-  if (totalScore >= 60) return 'C (Khá)';
+  if (totalScore >= 90) return 'S (Xuất sắc)';
+  if (totalScore >= 80) return 'A (Tốt)';
+  if (totalScore >= 65) return 'B (Khá)';
+  if (totalScore >= 50) return 'C (Trung bình)';
   return 'D (Cần cải thiện)';
 }
 
 /**
- * 1. Tính toán KPI cho toàn bộ nhân viên trong một kỳ (period: YYYY-MM)
- * Điểm = (tasksCompleted * 10) + (tasksOnTime / tasksCompleted * 50) + bonus
+ * Phân tích chuỗi period (Tháng YYYY-MM, Quý YYYY-QX, Năm YYYY) thành mốc thời gian Date
  */
-export const calculateKPI = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-  try {
-    const adminId = req.user?.id;
-    const requestedPeriod = req.body?.period;
-    let period: string;
-    if (requestedPeriod === undefined) {
-      const now = new Date();
-      period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    } else if (
-      typeof requestedPeriod === 'string' &&
-      /^\d{4}-(0[1-9]|1[0-2])$/.test(requestedPeriod)
-    ) {
-      period = requestedPeriod;
-    } else {
-      res.status(400).json({ success: false, message: 'Kỳ KPI không hợp lệ. Định dạng yêu cầu: YYYY-MM.' });
-      return;
-    }
+export function parsePeriodRange(rawPeriod?: unknown): { startDate: Date; endDate: Date; normalizedPeriod: string } {
+  let period = '';
+  if (typeof rawPeriod === 'string') {
+    period = rawPeriod.trim();
+  } else if (rawPeriod && typeof rawPeriod === 'object' && rawPeriod instanceof Date) {
+    period = `${rawPeriod.getFullYear()}-${String(rawPeriod.getMonth() + 1).padStart(2, '0')}`;
+  }
 
+  if (!period) {
+    const now = new Date();
+    period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  }
+
+  // Format 1: YYYY-MM
+  if (/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) {
     const [yearStr, monthStr] = period.split('-');
     const year = parseInt(yearStr, 10);
     const month = parseInt(monthStr, 10);
+    const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+    const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    return { startDate, endDate, normalizedPeriod: period };
+  }
 
-    const startOfMonth = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
-    const endOfMonth = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+  // Format 2: YYYY-QX
+  if (/^\d{4}-Q[1-4]$/i.test(period)) {
+    const [yearStr, qStr] = period.toUpperCase().split('-');
+    const year = parseInt(yearStr, 10);
+    const quarter = parseInt(qStr.replace('Q', ''), 10);
+    const startMonth = (quarter - 1) * 3;
+    const endMonth = startMonth + 3;
+    const startDate = new Date(Date.UTC(year, startMonth, 1, 0, 0, 0, 0));
+    const endDate = new Date(Date.UTC(year, endMonth, 0, 23, 59, 59, 999));
+    return { startDate, endDate, normalizedPeriod: `${year}-${qStr}` };
+  }
 
-    const userWhere: any = { isActive: true, role: 'EMPLOYEE' };
-    if (req.user?.role === 'MANAGER') {
-      userWhere.departmentId = req.user.departmentId || '__no_department__';
-    } else if (
-      req.user?.role === 'ADMIN' &&
-      typeof req.body?.departmentId === 'string' &&
-      req.body.departmentId !== 'ALL'
-    ) {
-      userWhere.departmentId = req.body.departmentId;
+  // Format 3: YYYY
+  if (/^\d{4}$/.test(period)) {
+    const year = parseInt(period, 10);
+    const startDate = new Date(Date.UTC(year, 0, 1, 0, 0, 0, 0));
+    const endDate = new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999));
+    return { startDate, endDate, normalizedPeriod: period };
+  }
+
+  // Fallback to current month
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const normalizedPeriod = `${year}-${String(month).padStart(2, '0')}`;
+  const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+  const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+  return { startDate, endDate, normalizedPeriod };
+}
+
+/**
+ * Lấy danh sách nhân sự trong phạm vi tính điểm KPI:
+ * - Khi người dùng chọn "Toàn Bộ Phòng Ban" (hoặc không truyền departmentId), hệ thống PHẢI
+ *   trả về toàn bộ nhân sự có trong công ty và bảng xếp hạng Top 3 chung toàn công ty,
+ *   không lọc cứng theo phòng ban riêng của user.
+ * - Đảm bảo các nhân sự "Chưa phân bổ" phòng ban (nếu có dữ liệu KPI) vẫn xuất hiện đầy đủ
+ *   trong bảng điểm và danh sách Top 3, giúp tài khoản EMPLOYEE nhìn thấy đủ số lượng như tài khoản ADMIN.
+ */
+export async function getScopedUsers(
+  currentUser: { id: string; role: string; departmentId?: string | null },
+  departmentFilter?: string
+) {
+  let userWhere: any = { isActive: true };
+
+  // Nếu người dùng chọn lọc theo 1 phòng ban cụ thể (khác ALL/all/empty)
+  if (
+    departmentFilter &&
+    departmentFilter !== 'ALL' &&
+    departmentFilter !== 'all' &&
+    departmentFilter.trim() !== ''
+  ) {
+    if (departmentFilter === 'UNASSIGNED' || departmentFilter === 'NONE') {
+      userWhere.departmentId = null;
+    } else {
+      userWhere.departmentId = departmentFilter;
     }
+  }
 
-    const users = await prisma.user.findMany({
-      where: userWhere,
-      include: { department: true },
-    });
+  const users = await prisma.user.findMany({
+    where: userWhere,
+    include: { department: true },
+    orderBy: { name: 'asc' },
+  });
 
-    const completedTasks = users.length
-      ? await prisma.task.findMany({
-          where: {
-            assigneeId: { in: users.map((user) => user.id) },
-            status: 'DONE',
-            updatedAt: { gte: startOfMonth, lte: endOfMonth },
-          },
-        })
-      : [];
-    const tasksByUser = new Map<string, typeof completedTasks>();
-    for (const task of completedTasks) {
-      if (!task.assigneeId) continue;
-      const userTasks = tasksByUser.get(task.assigneeId) ?? [];
-      userTasks.push(task);
-      tasksByUser.set(task.assigneeId, userTasks);
-    }
+  return users;
+}
 
-    const calculatedResults = await Promise.all(users.map(async (user) => {
+/**
+ * Hàm tính toán và lưu trực tiếp kết quả đánh giá KPI vào cơ sở dữ liệu Prisma (KpiLog)
+ * Công thức chuẩn: Hoàn thành task (40%) + Đúng hạn (40%) + Điểm thưởng Manager (20%)
+ */
+export async function computeAndPersistKpiForUsers(
+  users: Array<{ id: string; name: string; avatar?: string | null; email: string; role: string; department?: { id: string; name: string } | null }>,
+  period: string,
+  startDate: Date,
+  endDate: Date
+) {
+  const userIds = users.map((u) => u.id);
+  if (userIds.length === 0) return [];
+
+  // Lấy toàn bộ tasks của nhân viên trong kỳ được tính
+  const tasksInPeriod = await prisma.task.findMany({
+    where: {
+      assigneeId: { in: userIds },
+      OR: [
+        { dueDate: { gte: startDate, lte: endDate } },
+        { updatedAt: { gte: startDate, lte: endDate } },
+        { createdAt: { gte: startDate, lte: endDate } },
+      ],
+    },
+  });
+
+  const tasksByUser = new Map<string, typeof tasksInPeriod>();
+  for (const task of tasksInPeriod) {
+    if (!task.assigneeId) continue;
+    const list = tasksByUser.get(task.assigneeId) ?? [];
+    list.push(task);
+    tasksByUser.set(task.assigneeId, list);
+  }
+
+  // Lấy các bản ghi KPI cũ để bảo tồn điểm thưởng Manager nếu có
+  const existingKpis = await prisma.kpiLog.findMany({
+    where: {
+      userId: { in: userIds },
+      period,
+    },
+  });
+  const existingKpiMap = new Map<string, (typeof existingKpis)[0]>();
+  for (const kpi of existingKpis) {
+    existingKpiMap.set(kpi.userId, kpi);
+  }
+
+  const results = await Promise.all(
+    users.map(async (user) => {
       const userTasks = tasksByUser.get(user.id) ?? [];
-      const tasksCompleted = userTasks.length;
-      let tasksOnTime = 0;
-      let bonus = 0;
+      const totalTasksCount = userTasks.length;
+      const completedTasks = userTasks.filter((t) => t.status === 'DONE');
+      const completedTasksCount = completedTasks.length;
 
-      for (const t of userTasks) {
-        const onTime = !t.dueDate || new Date(t.updatedAt) <= new Date(t.dueDate);
-        if (onTime) {
-          tasksOnTime++;
-          if (t.priority === 'URGENT') bonus += 2;
-          else if (t.priority === 'HIGH') bonus += 1;
+      // Công việc hoàn thành đúng hạn (không quá hạn hoặc không set deadline)
+      const onTimeTasks = completedTasks.filter((t) => {
+        if (!t.dueDate) return true;
+        return new Date(t.updatedAt) <= new Date(t.dueDate);
+      });
+      const onTimeTasksCount = onTimeTasks.length;
+
+      // 1. Điểm hoàn thành công việc: Tối đa 40 điểm
+      const completionRate =
+        totalTasksCount > 0
+          ? Math.round((completedTasksCount / totalTasksCount) * 100 * 10) / 10
+          : 0;
+      const taskCompletionScore = Math.round((completionRate / 100) * 40 * 10) / 10;
+
+      // 2. Điểm đúng hạn: Tối đa 40 điểm
+      const onTimeRate =
+        completedTasksCount > 0
+          ? Math.round((onTimeTasksCount / completedTasksCount) * 100 * 10) / 10
+          : 0;
+      const onTimeScore = Math.round((onTimeRate / 100) * 40 * 10) / 10;
+
+      // 3. Điểm thưởng Manager: Tối đa 20 điểm
+      const existingKpi = existingKpiMap.get(user.id);
+      const existingDetails = (existingKpi?.details as any) || {};
+      let bonusScore = 0;
+      if (typeof existingDetails.bonusScore === 'number') {
+        bonusScore = existingDetails.bonusScore;
+      } else if (typeof existingDetails.bonus === 'number') {
+        bonusScore = existingDetails.bonus;
+      } else {
+        // Tính điểm thưởng mặc định dựa trên task khẩn cấp/ưu tiên cao đã hoàn thành đúng hạn
+        let autoBonus = 0;
+        for (const t of onTimeTasks) {
+          if (t.priority === 'URGENT') autoBonus += 3;
+          else if (t.priority === 'HIGH') autoBonus += 2;
+          else autoBonus += 1;
         }
+        bonusScore = Math.min(20, autoBonus);
       }
 
-      const onTimeRatio = tasksCompleted > 0 ? tasksOnTime / tasksCompleted : 0;
-      const baseCompletionScore = tasksCompleted * 10;
-      const onTimeScore = onTimeRatio * 50;
+      // Tổng điểm (tối đa 100)
+      const totalScore = Math.min(
+        100,
+        Math.round((taskCompletionScore + onTimeScore + bonusScore) * 10) / 10
+      );
+      const rank = determineKpiRank(totalScore);
 
-      let totalScore = Math.round((baseCompletionScore + onTimeScore + bonus) * 10) / 10;
-      if (totalScore > 100) totalScore = 100;
-
-      const rank = determineRank(totalScore);
-
-      await prisma.kpiLog.upsert({
+      const savedKpi = await prisma.kpiLog.upsert({
         where: {
           userId_period: {
             userId: user.id,
@@ -237,42 +357,102 @@ export const calculateKPI = async (req: AuthenticatedRequest, res: Response): Pr
           },
         },
         update: {
-          tasksCompleted,
-          tasksOnTime,
+          tasksCompleted: completedTasksCount,
+          tasksOnTime: onTimeTasksCount,
           totalScore,
           rank,
           details: {
-            bonus,
-            onTimeRatio: Math.round(onTimeRatio * 100),
+            completedTasksCount,
+            totalTasksCount,
+            completionRate,
+            onTimeTasksCount,
+            onTimeRate,
+            taskCompletionScore,
+            onTimeScore,
+            bonusScore,
             taskIds: userTasks.map((t) => t.id),
           },
         },
         create: {
           userId: user.id,
           period,
-          tasksCompleted,
-          tasksOnTime,
+          tasksCompleted: completedTasksCount,
+          tasksOnTime: onTimeTasksCount,
           totalScore,
           rank,
           details: {
-            bonus,
-            onTimeRatio: Math.round(onTimeRatio * 100),
+            completedTasksCount,
+            totalTasksCount,
+            completionRate,
+            onTimeTasksCount,
+            onTimeRate,
+            taskCompletionScore,
+            onTimeScore,
+            bonusScore,
             taskIds: userTasks.map((t) => t.id),
           },
         },
       });
 
       return {
+        id: savedKpi.id,
         userId: user.id,
         userName: user.name,
-        department: user.department?.name || 'Chưa phân bổ',
-        period,
-        tasksCompleted,
-        tasksOnTime,
+        userAvatar: user.avatar,
+        userEmail: user.email,
+        departmentName: user.department?.name || 'Chưa phân bổ',
+        role: user.role,
+        completedTasksCount,
+        totalTasksCount,
+        completionRate,
+        onTimeTasksCount,
+        onTimeRate,
+        taskCompletionScore,
+        onTimeScore,
+        bonusScore,
         totalScore,
         rank,
+        period,
+        // Compatibility
+        name: user.name,
+        avatar: user.avatar,
+        department: user.department?.name || 'Chưa phân bổ',
+        tasksCompleted: completedTasksCount,
+        tasksOnTime: onTimeTasksCount,
+        kpiScore: totalScore,
+        qualityScore: onTimeRate,
+        scoreBreakdown: {
+          taskCompletion: taskCompletionScore,
+          onTime: onTimeScore,
+          bonus: bonusScore,
+        },
       };
-    }));
+    })
+  );
+
+  results.sort((a, b) => b.totalScore - a.totalScore);
+  return results;
+}
+
+/**
+ * 1. Tính toán KPI cho toàn bộ nhân sự theo công thức chuẩn:
+ * Hoàn thành task (40%) + Đúng hạn (40%) + Điểm thưởng Manager (20%).
+ * Cập nhật trực tiếp vào bảng KpiLog (KpiRecord) trong DB và trả về cấu trúc chuẩn.
+ */
+export const calculateKPI = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const adminId = req.user?.id;
+    if (!req.user) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
+
+    const { startDate, endDate, normalizedPeriod } = parsePeriodRange(req.body?.period);
+    const period = normalizedPeriod;
+    const departmentFilter = typeof req.body?.departmentId === 'string' ? req.body.departmentId : undefined;
+
+    const users = await getScopedUsers(req.user, departmentFilter);
+    const calculatedResults = await computeAndPersistKpiForUsers(users, period, startDate, endDate);
 
     if (adminId) {
       await logActivity({
@@ -280,14 +460,30 @@ export const calculateKPI = async (req: AuthenticatedRequest, res: Response): Pr
         action: 'KPI_CALCULATED',
         entityType: 'KPI',
         entityId: period,
-        description: `Thực hiện tính toán và cập nhật KPI cho ${users.length} nhân viên kỳ ${period}`,
-        metadata: { period, userCount: users.length, departmentId: req.user?.role === 'MANAGER' ? req.user.departmentId : req.body?.departmentId },
+        description: `Thực hiện tính toán và cập nhật KPI cho ${users.length} nhân sự kỳ ${period}`,
+        metadata: { period, userCount: users.length, departmentId: req.body?.departmentId },
       });
+    }
+
+    // Gửi thông báo real-time qua Socket.io tới các nhân viên được cập nhật điểm KPI
+    const io = req.app.get('io');
+    for (const r of calculatedResults) {
+      try {
+        const notif = await createNotification({
+          userId: r.userId,
+          type: 'KPI_GENERATED',
+          title: 'Manager đã tính lại điểm KPI',
+          message: `Điểm KPI kỳ ${period} của bạn đã được cập nhật: ${r.totalScore} điểm (Hạng ${r.rank}).`,
+        });
+        sendRealtimeNotification(io, r.userId, notif);
+      } catch (err) {
+        console.warn(`[Socket] Không thể gửi thông báo KPI tới user ${r.userId}:`, err);
+      }
     }
 
     res.status(200).json({
       success: true,
-      message: `Đã tính toán và cập nhật KPI thành công cho kỳ ${period}!`,
+      message: 'Đã tính toán lại điểm KPI toàn diện cho đội ngũ',
       totalUsers: calculatedResults.length,
       data: calculatedResults,
     });
@@ -314,13 +510,11 @@ export const getKpiDashboard = async (req: AuthenticatedRequest, res: Response):
         ? period
         : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
 
-    const userScope: any = user?.role === 'ADMIN'
-      ? {}
-      : user?.role === 'MANAGER'
-      ? { departmentId: user.departmentId || '__no_department__' }
-      : { id: user?.id };
+    const scopedUsers = await getScopedUsers(user!);
+    const scopedUserIds = scopedUsers.map((u) => u.id);
+
     const kpiLogs = await prisma.kpiLog.findMany({
-      where: { period: currentPeriod, user: userScope },
+      where: { period: currentPeriod, userId: { in: scopedUserIds } },
       include: {
         user: {
           select: {
@@ -355,7 +549,7 @@ export const getKpiDashboard = async (req: AuthenticatedRequest, res: Response):
 
     // Xu hướng 6 tháng gần nhất
     const trendLogs = await prisma.kpiLog.findMany({
-      where: { user: userScope },
+      where: { userId: { in: scopedUserIds } },
       take: 100,
       orderBy: { period: 'desc' },
       select: { period: true, totalScore: true },
@@ -401,77 +595,240 @@ export const getKpiDashboard = async (req: AuthenticatedRequest, res: Response):
   }
 };
 
-export const getKpiReport = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+/**
+ * Lấy danh sách điểm KPI chi tiết toàn bộ nhân sự theo kỳ và phòng ban.
+ * Luôn đảm bảo trả về 100% nhân sự trong DB (nếu chưa có bản ghi thì tự động tính toán và lưu DB ngay lập tức).
+ */
+export const getKpiList = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const user = req.user;
-    const period = typeof req.query.period === 'string'
-      ? req.query.period
-      : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-    const departmentId = typeof req.query.departmentId === 'string' ? req.query.departmentId : undefined;
-    const userScope: any = { role: 'EMPLOYEE', isActive: true };
-
-    if (user?.role === 'EMPLOYEE') {
-      userScope.id = user.id;
-    } else if (user?.role === 'MANAGER') {
-      userScope.departmentId = user.departmentId || '__no_department__';
-    } else if (departmentId && departmentId !== 'ALL') {
-      userScope.departmentId = departmentId;
+    if (!user) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
     }
 
-    const entries = await prisma.kpiLog.findMany({
-      where: { period, user: userScope },
-      include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            avatar: true,
-            departmentId: true,
-            department: { select: { name: true } },
+    const { startDate, endDate, normalizedPeriod } = parsePeriodRange(req.query.period);
+    const period = normalizedPeriod;
+    const departmentId = typeof req.query.departmentId === 'string' ? req.query.departmentId : undefined;
+
+    // Lấy toàn bộ danh sách nhân sự trong phạm vi
+    const users = await getScopedUsers(user, departmentId);
+    const userIds = users.map((u) => u.id);
+
+    // Lấy các bản ghi KpiLog đã tính toán trong DB
+    const existingKpis = userIds.length > 0
+      ? await prisma.kpiLog.findMany({
+          where: {
+            userId: { in: userIds },
+            period,
           },
+        })
+      : [];
+
+    // Nếu DB chưa có bản ghi hoặc thiếu nhân viên: Tự động kích hoạt tính toán nhanh và lưu vào Prisma DB!
+    if (existingKpis.length < users.length) {
+      const calculatedResults = await computeAndPersistKpiForUsers(users, period, startDate, endDate);
+      res.status(200).json({
+        success: true,
+        message: 'Lấy danh sách đánh giá KPI thành công',
+        data: calculatedResults,
+      });
+      return;
+    }
+
+    // Đã có đầy đủ bản ghi trong DB:
+    const existingKpiMap = new Map<string, (typeof existingKpis)[0]>();
+    for (const kpi of existingKpis) {
+      existingKpiMap.set(kpi.userId, kpi);
+    }
+
+    const data = users.map((u) => {
+      const existing = existingKpiMap.get(u.id)!;
+      const details = (existing.details as any) || {};
+      const completedTasksCount = existing.tasksCompleted ?? Number(details.completedTasksCount) ?? 0;
+      const totalTasksCount = Number(details.totalTasksCount) || completedTasksCount;
+      const completionRate = typeof details.completionRate === 'number'
+        ? details.completionRate
+        : totalTasksCount > 0
+        ? Math.round((completedTasksCount / totalTasksCount) * 100 * 10) / 10
+        : 0;
+      const onTimeTasksCount = existing.tasksOnTime ?? Number(details.onTimeTasksCount) ?? 0;
+      const onTimeRate = typeof details.onTimeRate === 'number'
+        ? details.onTimeRate
+        : completedTasksCount > 0
+        ? Math.round((onTimeTasksCount / completedTasksCount) * 100 * 10) / 10
+        : 0;
+      const taskCompletionScore = typeof details.taskCompletionScore === 'number'
+        ? details.taskCompletionScore
+        : Math.round((completionRate / 100) * 40 * 10) / 10;
+      const onTimeScore = typeof details.onTimeScore === 'number'
+        ? details.onTimeScore
+        : Math.round((onTimeRate / 100) * 40 * 10) / 10;
+      const bonusScore = typeof details.bonusScore === 'number'
+        ? details.bonusScore
+        : typeof details.bonus === 'number'
+        ? details.bonus
+        : 0;
+      const totalScore = existing.totalScore;
+      const rank = existing.rank && existing.rank.length === 1 ? existing.rank : determineKpiRank(totalScore);
+
+      return {
+        id: existing.id,
+        userId: u.id,
+        userName: u.name,
+        userAvatar: u.avatar,
+        userEmail: u.email,
+        departmentName: u.department?.name || 'Chưa phân bổ',
+        role: u.role,
+        completedTasksCount,
+        totalTasksCount,
+        completionRate,
+        onTimeTasksCount,
+        onTimeRate,
+        taskCompletionScore,
+        onTimeScore,
+        bonusScore,
+        totalScore,
+        rank,
+        period,
+        name: u.name,
+        avatar: u.avatar,
+        department: u.department?.name || 'Chưa phân bổ',
+        tasksCompleted: completedTasksCount,
+        tasksOnTime: onTimeTasksCount,
+        kpiScore: totalScore,
+        qualityScore: onTimeRate,
+        scoreBreakdown: {
+          taskCompletion: taskCompletionScore,
+          onTime: onTimeScore,
+          bonus: bonusScore,
+        },
+      };
+    });
+
+    data.sort((a, b) => b.totalScore - a.totalScore);
+
+    res.status(200).json({
+      success: true,
+      message: 'Lấy danh sách đánh giá KPI thành công',
+      data,
+    });
+  } catch (error: any) {
+    console.error('Lỗi getKpiList:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi lấy danh sách KPI.',
+      error: error.message,
+    });
+  }
+};
+
+export const getKpiReport = getKpiList;
+
+/**
+ * Cập nhật điểm thưởng Manager cho một nhân sự trong kỳ cụ thể
+ */
+export const updateKpiBonus = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { userId, period, bonusScore } = req.body;
+    const targetUserId = req.params.userId || userId;
+    if (!targetUserId) {
+      res.status(400).json({ success: false, message: 'Thiếu userId cần cập nhật.' });
+      return;
+    }
+
+    const { normalizedPeriod } = parsePeriodRange(period);
+    const parsedBonus = Math.max(0, Math.min(20, Math.round(Number(bonusScore) * 10) / 10 || 0));
+
+    const user = await prisma.user.findUnique({
+      where: { id: targetUserId },
+      include: { department: true },
+    });
+    if (!user) {
+      res.status(404).json({ success: false, message: 'Không tìm thấy nhân viên.' });
+      return;
+    }
+
+    const existingLog = await prisma.kpiLog.findUnique({
+      where: { userId_period: { userId: targetUserId, period: normalizedPeriod } },
+    });
+
+    const details = (existingLog?.details as any) || {};
+    const taskCompletionScore = Number(details.taskCompletionScore) || 0;
+    const onTimeScore = Number(details.onTimeScore) || 0;
+    const completedTasksCount = existingLog?.tasksCompleted ?? Number(details.completedTasksCount) ?? 0;
+    const totalTasksCount = Number(details.totalTasksCount) || completedTasksCount;
+    const completionRate = Number(details.completionRate) || (totalTasksCount > 0 ? Math.round((completedTasksCount / totalTasksCount) * 100 * 10) / 10 : 0);
+    const onTimeTasksCount = existingLog?.tasksOnTime ?? Number(details.onTimeTasksCount) ?? 0;
+    const onTimeRate = Number(details.onTimeRate) || (completedTasksCount > 0 ? Math.round((onTimeTasksCount / completedTasksCount) * 100 * 10) / 10 : 0);
+
+    const totalScore = Math.min(100, Math.round((taskCompletionScore + onTimeScore + parsedBonus) * 10) / 10);
+    const rank = determineKpiRank(totalScore);
+
+    const updated = await prisma.kpiLog.upsert({
+      where: { userId_period: { userId: targetUserId, period: normalizedPeriod } },
+      update: {
+        totalScore,
+        rank,
+        details: {
+          ...details,
+          completedTasksCount,
+          totalTasksCount,
+          completionRate,
+          onTimeTasksCount,
+          onTimeRate,
+          taskCompletionScore,
+          onTimeScore,
+          bonusScore: parsedBonus,
         },
       },
-      orderBy: [{ totalScore: 'desc' }, { tasksCompleted: 'desc' }],
+      create: {
+        userId: targetUserId,
+        period: normalizedPeriod,
+        tasksCompleted: completedTasksCount,
+        tasksOnTime: onTimeTasksCount,
+        totalScore,
+        rank,
+        details: {
+          completedTasksCount,
+          totalTasksCount,
+          completionRate,
+          onTimeTasksCount,
+          onTimeRate,
+          taskCompletionScore,
+          onTimeScore,
+          bonusScore: parsedBonus,
+        },
+      },
     });
 
     res.status(200).json({
       success: true,
-      data: entries.map((entry) => ({
-        id: entry.user.id,
-        name: entry.user.name,
-        avatar: entry.user.avatar,
-        departmentId: entry.user.departmentId,
-        department: entry.user.department?.name || 'Chưa phân bổ',
-        tasksCompleted: entry.tasksCompleted,
-        tasksOnTime: entry.tasksOnTime,
-        qualityScore: entry.tasksCompleted
-          ? Math.round((entry.tasksOnTime / entry.tasksCompleted) * 100)
-          : 0,
-        scoreBreakdown: {
-          taskCompletion: entry.tasksCompleted * 10,
-          onTime: entry.tasksCompleted
-            ? Math.round((entry.tasksOnTime / entry.tasksCompleted) * 50 * 10) / 10
-            : 0,
-          bonus:
-            entry.details &&
-            typeof entry.details === 'object' &&
-            !Array.isArray(entry.details) &&
-            typeof entry.details.bonus === 'number'
-              ? entry.details.bonus
-              : 0,
-        },
-        kpiScore: entry.totalScore,
-        rank: entry.rank.split(' ')[0],
-        badges: [],
-      })),
+      message: `Đã cập nhật điểm thưởng Manager cho ${user.name}: +${parsedBonus}đ (Tổng: ${totalScore}đ - Hạng ${rank})`,
+      data: {
+        id: updated.id,
+        userId: user.id,
+        userName: user.name,
+        userAvatar: user.avatar,
+        userEmail: user.email,
+        departmentName: user.department?.name || 'Chưa phân bổ',
+        role: user.role,
+        completedTasksCount,
+        totalTasksCount,
+        completionRate,
+        onTimeTasksCount,
+        onTimeRate,
+        taskCompletionScore,
+        onTimeScore,
+        bonusScore: parsedBonus,
+        totalScore,
+        rank,
+        period: normalizedPeriod,
+      },
     });
   } catch (error: any) {
-    console.error('Lỗi getKpiReport:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Lỗi máy chủ khi lấy báo cáo KPI.',
-      error: error.message,
-    });
+    console.error('Lỗi updateKpiBonus:', error);
+    res.status(500).json({ success: false, message: 'Lỗi máy chủ khi cập nhật điểm thưởng.', error: error.message });
   }
 };
 
@@ -492,10 +849,7 @@ export const getUserKpiHistory = async (req: AuthenticatedRequest, res: Response
       return;
     }
 
-    if (
-      req.user?.role === 'EMPLOYEE' && req.user.id !== userId ||
-      req.user?.role === 'MANAGER' && req.user.departmentId !== user.departmentId
-    ) {
+    if (req.user?.role === 'EMPLOYEE' && req.user.id !== userId) {
       res.status(403).json({ success: false, message: 'Bạn không có quyền xem lịch sử KPI này.' });
       return;
     }
@@ -528,6 +882,10 @@ export const getUserKpiHistory = async (req: AuthenticatedRequest, res: Response
 export const getLeaderboard = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const user = req.user;
+    if (!user) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
     const { period } = req.query;
 
     const targetPeriod =
@@ -535,14 +893,13 @@ export const getLeaderboard = async (req: AuthenticatedRequest, res: Response): 
         ? period
         : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
 
+    const scopedUsers = await getScopedUsers(user);
+    const scopedUserIds = scopedUsers.map((u) => u.id);
+
     const leaderboard = await prisma.kpiLog.findMany({
       where: {
         period: targetPeriod,
-        user: user?.role === 'ADMIN'
-          ? {}
-          : user?.role === 'MANAGER'
-          ? { departmentId: user.departmentId || '__no_department__' }
-          : { id: user?.id },
+        userId: { in: scopedUserIds },
       },
       include: {
         user: {
@@ -587,6 +944,10 @@ export const getLeaderboard = async (req: AuthenticatedRequest, res: Response): 
  */
 export const exportKpiExcel = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
+    if (!req.user) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
     const { period } = req.query;
 
     const targetPeriod =
@@ -594,19 +955,14 @@ export const exportKpiExcel = async (req: AuthenticatedRequest, res: Response): 
         ? period
         : `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
 
-    const userWhere: any = { role: 'EMPLOYEE', isActive: true };
-    if (req.user?.role === 'MANAGER') {
-        userWhere.departmentId = req.user.departmentId || '__no_department__';
-    } else if (
-        req.user?.role === 'ADMIN' &&
-        typeof req.query.departmentId === 'string' &&
-        req.query.departmentId !== 'ALL'
-    ) {
-        userWhere.departmentId = req.query.departmentId;
-    }
+    const scopedUsers = await getScopedUsers(
+      req.user,
+      typeof req.query.departmentId === 'string' ? req.query.departmentId : undefined
+    );
+    const scopedUserIds = scopedUsers.map((u) => u.id);
 
     const kpiLogs = await prisma.kpiLog.findMany({
-        where: { period: targetPeriod, user: userWhere },
+      where: { period: targetPeriod, userId: { in: scopedUserIds } },
       include: {
         user: {
           include: {
@@ -749,7 +1105,7 @@ export const exportKpiExcel = async (req: AuthenticatedRequest, res: Response): 
       where: {
         status: 'DONE',
         updatedAt: { gte: startOfMonth, lte: endOfMonth },
-        assignee: userWhere,
+        assigneeId: { in: scopedUserIds },
       },
       include: {
         assignee: { select: { name: true } },
@@ -813,6 +1169,114 @@ export const exportKpiExcel = async (req: AuthenticatedRequest, res: Response): 
     res.status(500).json({
       success: false,
       message: 'Lỗi máy chủ khi xuất báo cáo KPI Excel.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 6. Tính Năng AI Nhận Xét Hiệu Suất Cá Nhân
+ * POST /api/kpi/ai-review
+ * Body: { userId: string, period?: string }
+ */
+export const generateAiKpiReview = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { userId, period: requestedPeriod } = req.body;
+    if (!userId) {
+      res.status(400).json({ success: false, message: 'Vui lòng cung cấp userId cần nhận xét.' });
+      return;
+    }
+
+    const { startDate, endDate, normalizedPeriod } = parsePeriodRange(requestedPeriod);
+    const period = normalizedPeriod;
+
+    // Tìm thông tin user
+    const targetUser = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { department: true },
+    });
+
+    if (!targetUser) {
+      res.status(404).json({ success: false, message: 'Không tìm thấy thông tin nhân sự.' });
+      return;
+    }
+
+    // Lấy KPI hiện tại của user trong kỳ này
+    let kpiLog = await prisma.kpiLog.findFirst({
+      where: { userId, period },
+    });
+
+    // Nếu chưa có, tự động tính toán KPI cho nhân sự này ngay
+    if (!kpiLog) {
+      await computeAndPersistKpiForUsers([targetUser], period, startDate, endDate);
+      kpiLog = await prisma.kpiLog.findFirst({
+        where: { userId, period },
+      });
+    }
+
+    const details = (kpiLog?.details as any) || {};
+    const completedTasksCount = kpiLog?.tasksCompleted ?? Number(details.completedTasksCount) ?? 0;
+    const totalTasksCount = Number(details.totalTasksCount) || completedTasksCount;
+    const completionRate = typeof details.completionRate === 'number'
+      ? details.completionRate
+      : totalTasksCount > 0
+      ? Math.round((completedTasksCount / totalTasksCount) * 100 * 10) / 10
+      : 0;
+    const onTimeTasksCount = kpiLog?.tasksOnTime ?? Number(details.onTimeTasksCount) ?? 0;
+    const onTimeRate = typeof details.onTimeRate === 'number'
+      ? details.onTimeRate
+      : completedTasksCount > 0
+      ? Math.round((onTimeTasksCount / completedTasksCount) * 100 * 10) / 10
+      : 0;
+    const taskCompletionScore = typeof details.taskCompletionScore === 'number'
+      ? details.taskCompletionScore
+      : Math.round((completionRate / 100) * 40 * 10) / 10;
+    const onTimeScore = typeof details.onTimeScore === 'number'
+      ? details.onTimeScore
+      : Math.round((onTimeRate / 100) * 40 * 10) / 10;
+    const bonusScore = typeof details.bonusScore === 'number'
+      ? details.bonusScore
+      : typeof details.bonus === 'number'
+      ? details.bonus
+      : 0;
+    const totalScore = kpiLog?.totalScore ?? 0;
+    const rank = kpiLog?.rank && kpiLog.rank.length === 1 ? kpiLog.rank : determineKpiRank(totalScore);
+
+    const reviewText = await generateKpiPerformanceReview({
+      userName: targetUser.name,
+      userEmail: targetUser.email,
+      departmentName: targetUser.department?.name || 'Chưa phân bổ',
+      role: targetUser.role,
+      period,
+      totalScore,
+      rank,
+      completedTasksCount,
+      totalTasksCount,
+      completionRate,
+      onTimeTasksCount,
+      onTimeRate,
+      taskCompletionScore,
+      onTimeScore,
+      bonusScore,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Tạo nhận xét hiệu suất AI thành công.',
+      data: {
+        userId,
+        userName: targetUser.name,
+        period,
+        rank,
+        totalScore,
+        review: reviewText,
+      },
+    });
+  } catch (error: any) {
+    console.error('Lỗi generateAiKpiReview:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi sinh nhận xét hiệu suất AI.',
       error: error.message,
     });
   }

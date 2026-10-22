@@ -121,6 +121,11 @@ export const taskService = {
     return response.data;
   },
 
+  async updateTaskDeadline(id: string, dueDate: string | Date): Promise<Task> {
+    const response = await api.patch<Task>(`/tasks/${id}/deadline`, { dueDate });
+    return response.data;
+  },
+
   async deleteTask(id: string): Promise<void> {
     await api.delete(`/tasks/${id}`);
   },

@@ -10,6 +10,7 @@ import { configureSocket } from './config/socket';
 import routes from './routes';
 import { errorHandler, notFoundHandler } from './middlewares/errorHandler';
 import { prisma } from './config/database';
+import { cleanupPersonalProjects } from './scripts/cleanupPersonalProjects';
 
 dotenv.config();
 
@@ -59,6 +60,7 @@ httpServer.listen(PORT, async () => {
   try {
     await prisma.$connect();
     console.log('✅ Database connected successfully');
+    await cleanupPersonalProjects().catch((err) => console.warn('Lỗi cleanup projects rác:', err));
     const address = httpServer.address();
     const port = typeof address === 'object' && address ? address.port : PORT;
     console.log(`Server running at http://localhost:${port}`);

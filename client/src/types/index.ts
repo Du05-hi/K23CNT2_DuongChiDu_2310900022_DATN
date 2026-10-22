@@ -12,9 +12,11 @@ export interface User {
   id: string;
   email: string;
   name: string;
+  fullName?: string;
   role: Role;
   isActive: boolean;
   avatar?: string | null;
+  avatarUrl?: string | null;
   departmentId?: string | null;
   department?: Department | null;
   createdAt?: string;

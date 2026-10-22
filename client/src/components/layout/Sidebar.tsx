@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard,
   FolderKanban,
@@ -11,7 +12,9 @@ import {
   ChevronLeft,
   ChevronRight,
   Flame,
+  Calendar,
 } from 'lucide-react';
+import { apiClient } from '../../api/apiClient';
 import Avatar from '../ui/Avatar';
 import Badge from '../ui/Badge';
 
@@ -20,9 +23,11 @@ export type UserRole = 'ADMIN' | 'MANAGER' | 'EMPLOYEE';
 export interface SidebarUser {
   id: string;
   fullName: string;
+  name?: string;
   email: string;
   role: UserRole;
   avatarUrl?: string;
+  avatar?: string;
 }
 
 export interface SidebarProps {
@@ -42,6 +47,7 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
   adminOnly?: boolean;
   isAiSpecial?: boolean;
+  badgeType?: 'project' | 'kpi' | 'ai';
 }
 
 const navItems: NavItem[] = [
@@ -56,6 +62,13 @@ const navItems: NavItem[] = [
     label: 'Dự án',
     path: '/projects',
     icon: FolderKanban,
+    badgeType: 'project',
+  },
+  {
+    id: 'calendar',
+    label: 'Lịch làm việc',
+    path: '/calendar',
+    icon: Calendar,
   },
   {
     id: 'kanban',
@@ -65,9 +78,10 @@ const navItems: NavItem[] = [
   },
   {
     id: 'kpi',
-    label: 'KPI & Báo cáo',
+    label: 'Đánh giá KPI',
     path: '/kpi',
     icon: BarChart3,
+    badgeType: 'kpi',
   },
   {
     id: 'ai-assistant',
@@ -75,6 +89,7 @@ const navItems: NavItem[] = [
     path: '/ai-assistant',
     icon: Sparkles,
     isAiSpecial: true,
+    badgeType: 'ai',
   },
   {
     id: 'admin',
@@ -96,6 +111,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const isCollapsed = onToggleCollapse !== undefined ? collapsed : internalCollapsed;
+
+  // Real-time project count badge
+  const { data: projectCount = 0 } = useQuery({
+    queryKey: ['sidebar-project-count', currentUser?.id],
+    queryFn: async () => {
+      try {
+        const res = await apiClient.get<any>('/projects');
+        const list = Array.isArray(res.data) ? res.data : res.data?.data || [];
+        return list.length;
+      } catch {
+        return 0;
+      }
+    },
+    staleTime: 30000,
+  });
+
+  // Real-time KPI rank badge
+  const { data: userKpiRank = '' } = useQuery({
+    queryKey: ['sidebar-user-kpi-rank', currentUser?.id],
+    queryFn: async () => {
+      if (!currentUser?.id) return '';
+      try {
+        const res = await apiClient.get<any>('/kpi/my-kpi');
+        const currentKpi = res.data?.data?.currentKpi || res.data?.currentKpi;
+        if (currentKpi?.rank) {
+          const letter = currentKpi.rank.split(' ')[0];
+          return `Hạng ${letter}`;
+        }
+        if (typeof currentKpi?.totalScore === 'number' && currentKpi.totalScore > 0) {
+          return `${currentKpi.totalScore}đ`;
+        }
+        return 'Hạng A';
+      } catch {
+        return 'Hạng A';
+      }
+    },
+    staleTime: 60000,
+  });
 
   const handleToggle = () => {
     if (onToggleCollapse) {
@@ -208,13 +261,39 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   >
                     <span className="truncate">{item.label}</span>
 
+                    {/* Project count Badge */}
+                    {item.badgeType === 'project' && projectCount > 0 && (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-extrabold ${
+                          isActive
+                            ? 'bg-white/20 text-white'
+                            : 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300'
+                        }`}
+                      >
+                        {projectCount}
+                      </span>
+                    )}
+
+                    {/* KPI Rank Badge */}
+                    {item.badgeType === 'kpi' && (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${
+                          isActive
+                            ? 'bg-white/20 text-white'
+                            : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800'
+                        }`}
+                      >
+                        {userKpiRank || 'Hạng A'}
+                      </span>
+                    )}
+
                     {/* AI Special Badge */}
                     {item.isAiSpecial && (
                       <span
                         className={`rounded-full px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wider ${
                           isActive
                             ? 'bg-white/20 text-white'
-                            : 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-xs'
+                            : 'bg-gradient-to-r from-purple-500 to-indigo-600 text-white shadow-xs ring-2 ring-purple-500/20 animate-pulse'
                         }`}
                       >
                         AI
@@ -256,8 +335,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {/* User Info */}
           <div className="flex items-center gap-2.5 min-w-0">
             <Avatar
-              src={currentUser?.avatarUrl}
-              name={currentUser?.fullName || 'Tài khoản'}
+              src={currentUser?.avatarUrl || currentUser?.avatar}
+              name={currentUser?.fullName || currentUser?.name || 'Tài khoản'}
               size="md"
               status="online"
             />

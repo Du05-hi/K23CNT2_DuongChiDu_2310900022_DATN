@@ -58,9 +58,9 @@ export const OAuthCallbackPage = () => {
   }, [dispatch, navigate]);
 
   return (
-    <main className="dark flex min-h-screen items-center justify-center bg-[#0b0f19] text-sm text-slate-300">
-      <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.06] px-6 py-4 shadow-xl backdrop-blur-xl">
-        <span className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+    <main className="flex min-h-screen items-center justify-center bg-slate-50 text-sm text-slate-700 dark:bg-slate-950 dark:text-slate-200">
+      <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white/90 px-6 py-4 shadow-xl backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/80">
+        <span className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent dark:border-indigo-400" />
         Đang hoàn tất đăng nhập...
       </div>
     </main>

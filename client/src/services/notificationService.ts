@@ -17,6 +17,7 @@ export interface Notification {
   message: string;
   type: NotificationType;
   isRead: boolean;
+  relatedId?: string | null;
   link?: string;
   metadata?: Record<string, unknown>;
   createdAt: string;

@@ -5,6 +5,7 @@ import {
   getMyTasks,
   getTaskById,
   updateTask,
+  updateTaskDeadline,
   updateTaskStatus,
   deleteTask,
   addComment,
@@ -35,6 +36,8 @@ router.post('/search-nl', searchTasksNL);
 // 2. Chi tiết và cập nhật công việc
 router.get('/:id', getTaskById);
 router.put('/:id', updateTask);
+router.patch('/:id/deadline', updateTaskDeadline);
+router.put('/:id/deadline', updateTaskDeadline);
 router.put('/:id/status', updateTaskStatus);
 router.delete('/:id', deleteTask);
 

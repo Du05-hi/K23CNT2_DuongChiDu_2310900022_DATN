@@ -88,6 +88,11 @@ export const Avatar: React.FC<AvatarProps> = ({
   onClick,
 }) => {
   const [imgError, setImgError] = useState(false);
+
+  React.useEffect(() => {
+    setImgError(false);
+  }, [src]);
+
   const sizeConfig = sizeClasses[size];
   const initials = getInitials(name);
   const bgColors = getColorFromName(name);

@@ -20,7 +20,15 @@ export const useAuth = () => {
       dispatch(setLoading(true));
       const response = await authService.getMe();
       if (response && response.data) {
-        dispatch(updateUser(response.data));
+        const enrichedUser = {
+          ...response.data,
+          fullName: response.data.name,
+          avatarUrl: response.data.avatar,
+        };
+        dispatch(updateUser(enrichedUser));
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('user', JSON.stringify(enrichedUser));
+        }
         return response.data;
       }
     } catch (error) {
@@ -91,7 +99,18 @@ export const useAuth = () => {
         dispatch(setLoading(true));
         const res = await authService.updateProfile(data);
         if (res.data) {
-          dispatch(updateUser(res.data));
+          const enrichedUser = {
+            ...res.data,
+            name: res.data.name,
+            fullName: res.data.name,
+            avatar: res.data.avatar,
+            avatarUrl: res.data.avatar,
+          };
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('user', JSON.stringify(enrichedUser));
+            window.dispatchEvent(new CustomEvent('user-profile-updated', { detail: enrichedUser }));
+          }
+          dispatch(updateUser(enrichedUser));
           toast.success('Cập nhật thông tin thành công!');
           return res.data;
         }

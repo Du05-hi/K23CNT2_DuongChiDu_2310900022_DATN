@@ -65,20 +65,61 @@ export interface KpiTrend {
   completedTasks: number;
 }
 
-export interface KpiCalculationEntry {
+export interface KpiEmployeeRecord {
+  id: string;
   userId: string;
   userName: string;
-  department: string;
-  period: string;
-  tasksCompleted: number;
-  tasksOnTime: number;
+  userAvatar?: string | null;
+  userEmail?: string;
+  departmentName: string;
+  role: string;
+  completedTasksCount: number;
+  totalTasksCount: number;
+  completionRate: number;
+  onTimeTasksCount: number;
+  onTimeRate: number;
+  taskCompletionScore: number;
+  onTimeScore: number;
+  bonusScore: number;
   totalScore: number;
-  rank: string;
+  rank: 'S' | 'A' | 'B' | 'C' | 'D';
+  period: string;
+  // Compatibility
+  name?: string;
+  avatar?: string | null;
+  department?: string;
+  tasksCompleted?: number;
+  tasksOnTime?: number;
+  kpiScore?: number;
+  qualityScore?: number;
+  scoreBreakdown?: {
+    taskCompletion?: number;
+    onTime?: number;
+    bonus?: number;
+    priority?: number;
+  };
+  badges?: string[];
 }
 
+export interface KpiCalculationEntry extends KpiEmployeeRecord {}
+
 export const kpiService = {
-  async calculateKPI(period: string, departmentId?: string): Promise<KpiCalculationEntry[]> {
-    const response = await api.post<KpiCalculationEntry[]>('/kpi/calculate', { period, departmentId });
+  async calculateKPI(period: string, departmentId?: string): Promise<{ success: boolean; message: string; data: KpiEmployeeRecord[] }> {
+    const response = await api.post<{ success: boolean; message: string; data: KpiEmployeeRecord[] }>('/kpi/calculate', { period, departmentId });
+    return response.data;
+  },
+
+  async getKpiList(params?: { period?: string; departmentId?: string }): Promise<{ success: boolean; data: KpiEmployeeRecord[] }> {
+    const response = await api.get<{ success: boolean; data: KpiEmployeeRecord[] }>('/kpi', { params });
+    return response.data;
+  },
+
+  async updateBonus(userId: string, period: string, bonusScore: number): Promise<{ success: boolean; data: KpiEmployeeRecord }> {
+    const response = await api.patch<{ success: boolean; data: KpiEmployeeRecord }>('/kpi/bonus', {
+      userId,
+      period,
+      bonusScore,
+    });
     return response.data;
   },
 
@@ -92,6 +133,14 @@ export const kpiService = {
   async getUserKpiHistory(userId: string): Promise<KpiLog[]> {
     const response = await api.get<{ history: KpiLog[] }>(`/kpi/user/${userId}`);
     return response.data.history;
+  },
+
+  async getAiKpiReview(userId: string, period?: string): Promise<{ success: boolean; message?: string; data: { userId: string; userName: string; period: string; rank: string; totalScore: number; review: string } }> {
+    const response = await api.post<{ success: boolean; message?: string; data: { userId: string; userName: string; period: string; rank: string; totalScore: number; review: string } }>('/kpi/ai-review', {
+      userId,
+      period,
+    });
+    return response.data;
   },
 
   async getLeaderboard(period?: string): Promise<LeaderboardEntry[]> {
