@@ -26,14 +26,17 @@ import {
   AlertCircle,
   Mic,
   Trash2,
+  FileText,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { apiClient } from '@/api/apiClient';
 import { useAuth } from '@/hooks/useAuth';
+import { useSocket } from '@/hooks/useSocket';
 import CountdownBadge from '@/components/ui/CountdownBadge';
 import { formatDateTime, formatDateOnly, pad } from '@/utils/deadline';
 import TaskDetailsModal from '@/components/TaskDetailsModal';
-import VoiceCommandModal, { type ParsedVoiceCommand } from '@/components/voice/VoiceCommandModal';
+import VoiceCommandModal, { type ParsedVoiceCommand } from '@/components/calendar/VoiceCommandModal';
+import ScheduleSummaryModal from '@/components/calendar/ScheduleSummaryModal';
 
 interface ProjectDeadlineItem {
   id: string;
@@ -64,21 +67,29 @@ interface TaskDeadlineItem {
   isOverdue?: boolean;
 }
 
-// Helper chuẩn hóa chuỗi ngày an toàn tuyệt đối tránh lỗi lệch múi giờ
+// Helper chuẩn hóa chuỗi ngày an toàn tuyệt đối theo local timezone tránh lỗi lệch múi giờ
 export const extractDateStr = (val: any): string => {
   if (!val) return '';
-  if (typeof val === 'string') {
-    // Nếu là dạng ISO "2026-10-22T21:34:00..." lấy ngay 10 ký tự đầu:
-    if (val.includes('T')) return val.split('T')[0];
-    if (val.includes(' ')) return val.split(' ')[0];
-    return val.substring(0, 10);
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return '';
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const day = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
   }
-  const d = new Date(val);
-  if (isNaN(d.getTime())) return '';
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  if (typeof val === 'string') {
+    // Nếu là chuỗi dạng chuẩn "YYYY-MM-DD" không có giờ, trả về ngay
+    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+    // Chuyển đổi sang Date để lấy đúng ngày theo múi giờ địa phương (local timezone) của trình duyệt
+    const d = new Date(val);
+    if (!isNaN(d.getTime())) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+  }
+  return '';
 };
 
 export const toDateKey = extractDateStr;
@@ -94,15 +105,8 @@ export const extractTimeStr = (val: any): string => {
       return `${h}:${m}`;
     }
   } catch {}
-  if (typeof val === 'string') {
-    if (val.includes('T')) {
-      const timePart = val.split('T')[1];
-      if (timePart) return timePart.substring(0, 5);
-    }
-    if (val.includes(' ')) {
-      const timePart = val.split(' ')[1];
-      if (timePart) return timePart.substring(0, 5);
-    }
+  if (typeof val === 'string' && /^\d{2}:\d{2}/.test(val)) {
+    return val.substring(0, 5);
   }
   return '';
 };
@@ -115,6 +119,7 @@ export const CalendarPage: React.FC = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const { socket } = useSocket();
 
   // Calendar View State: Year & Month
   const [currentDate, setCurrentDate] = useState(() => new Date());
@@ -134,10 +139,15 @@ export const CalendarPage: React.FC = () => {
   const [isSubmittingTask, setIsSubmittingTask] = useState(false);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
 
+  // AI Voice Summary Modal State (Đa phạm vi ngày & Text-To-Speech)
+  const [isSummaryModalOpen, setIsSummaryModalOpen] = useState(false);
+  const [summaryTargetDate, setSummaryTargetDate] = useState<string | Date | null>(null);
+
   // Drag & Drop Task Rescheduling State
   const [draggingTask, setDraggingTask] = useState<{ id: string; title: string; dueDate?: string | null } | null>(null);
   const [dragOverDateKey, setDragOverDateKey] = useState<string | null>(null);
   const isDraggingRef = React.useRef(false);
+  const isCreatingDirectTaskRef = React.useRef(false); // Khóa chống lặp (Mutex) khi thêm task trực tiếp từ Voice/Quick
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth(); // 0-indexed
@@ -155,12 +165,21 @@ export const CalendarPage: React.FC = () => {
     setCurrentDate(new Date());
   };
 
-  // Local state lưu các task vừa tạo để hiển thị ngay lập tức 0ms (Optimistic UI)
+  // State quản lý danh sách tasks hiển thị trên Lịch (hỗ trợ phân quyền & Optimistic UI)
+  const [tasks, setTasks] = useState<TaskDeadlineItem[]>([]);
   const [createdTasks, setCreatedTasks] = useState<TaskDeadlineItem[]>([]);
 
+  // ĐẢM BẢO CÔ LẬP LỊCH CÁ NHÂN KHI CHUYỂN ĐỔI TÀI KHOẢN (Logout/Login):
+  // Xóa sạch state cũ ngay lập tức để không lưu dữ liệu sót lại từ tài khoản trước đó
+  useEffect(() => {
+    setTasks([]);
+    setCreatedTasks([]);
+  }, [user?.id]);
+
   // 1. Fetch Calendar Events (Projects + Tasks) from Backend API
+  // Gắn user?.id vào queryKey để cô lập cache React Query 100% theo từng user
   const { data: calendarData, isLoading, refetch: refetchCalendar } = useQuery({
-    queryKey: ['calendar-events', year, month],
+    queryKey: ['calendar-events', user?.id, year, month],
     queryFn: async () => {
       const res = await apiClient.get<any>('/calendar/events', {
         params: { year, month: month + 1 },
@@ -173,7 +192,74 @@ export const CalendarPage: React.FC = () => {
       if (raw.data && (raw.data.tasks || raw.data.projects)) return raw.data;
       return { projects: [], tasks: [] };
     },
+    enabled: Boolean(user?.id),
   });
+
+  // Đồng bộ tasks từ server vào local state khi calendarData thay đổi
+  useEffect(() => {
+    if (!calendarData) return;
+    const raw = calendarData;
+    let serverTasks: TaskDeadlineItem[] = [];
+    if (Array.isArray(raw.tasks)) serverTasks = raw.tasks;
+    else if (Array.isArray(raw.data?.tasks)) serverTasks = raw.data.tasks;
+    else if (Array.isArray(raw)) serverTasks = raw;
+
+    setTasks(serverTasks);
+    // Xóa sạch mảng tạm createdTasks để chống cộng dồn trùng lặp sau khi server đã đồng bộ
+    setCreatedTasks([]);
+  }, [calendarData]);
+
+  // LẮNG NGHE SỰ KIỆN SOCKET.IO THỜI GIAN THỰC (Realtime Sync giữa Admin, Manager & Employee)
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleTaskDeleted = ({ taskId }: { taskId: string }) => {
+      setTasks((prev) => prev.filter((t) => t.id !== taskId));
+      setCreatedTasks((prev) => prev.filter((t) => t.id !== taskId));
+
+      queryClient.setQueriesData({ queryKey: ['calendar-events', user?.id] }, (oldData: any) => {
+        if (!oldData) return { projects: [], tasks: [] };
+        const currentTasks = oldData.tasks || oldData.data?.tasks || [];
+        return {
+          ...oldData,
+          tasks: currentTasks.filter((t: any) => t.id !== taskId),
+        };
+      });
+
+      queryClient.invalidateQueries({ queryKey: ['calendar-events'] });
+    };
+
+    const handleCalendarRefresh = () => {
+      queryClient.invalidateQueries({ queryKey: ['calendar-events'] });
+    };
+
+    const handleTaskCreated = (newTask: any) => {
+      if (newTask && newTask.id) {
+        // Chỉ thêm vào nếu task này liên quan đến user (tránh nhận nhầm task riêng người khác)
+        const isRelated =
+          newTask.createdById === user?.id ||
+          newTask.assigneeId === user?.id;
+
+        if (isRelated) {
+          setTasks((prev) => {
+            if (prev.some((t) => t.id === newTask.id)) return prev;
+            return [newTask, ...prev];
+          });
+        }
+        queryClient.invalidateQueries({ queryKey: ['calendar-events'] });
+      }
+    };
+
+    socket.on('task:deleted', handleTaskDeleted);
+    socket.on('calendar:refresh', handleCalendarRefresh);
+    socket.on('task:created', handleTaskCreated);
+
+    return () => {
+      socket.off('task:deleted', handleTaskDeleted);
+      socket.off('calendar:refresh', handleCalendarRefresh);
+      socket.off('task:created', handleTaskCreated);
+    };
+  }, [socket, user?.id, queryClient]);
 
   const projects: ProjectDeadlineItem[] = useMemo(() => {
     const raw = calendarData;
@@ -183,25 +269,36 @@ export const CalendarPage: React.FC = () => {
     return [];
   }, [calendarData]);
 
-  // Gộp các task từ server và các task vừa tạo mới (optimistic UI update 100%)
+  // Gộp các task từ server và các task vừa tạo mới với bộ lọc chống trùng lặp tuyệt đối theo ID & Nội dung (Unique Map)
   const allTasksList: TaskDeadlineItem[] = useMemo(() => {
-    const raw = calendarData;
-    let serverTasks: TaskDeadlineItem[] = [];
-    if (raw) {
-      if (Array.isArray(raw.tasks)) serverTasks = raw.tasks;
-      else if (Array.isArray(raw.data?.tasks)) serverTasks = raw.data.tasks;
-      else if (Array.isArray(raw)) serverTasks = raw;
-    }
-    if (createdTasks.length === 0) return serverTasks;
-    const serverTaskIds = new Set(serverTasks.map((t) => t.id));
-    const newLocalTasks = createdTasks.filter((t) => !serverTaskIds.has(t.id));
-    return [...newLocalTasks, ...serverTasks];
-  }, [calendarData, createdTasks]);
+    const combined = createdTasks.length > 0 ? [...createdTasks, ...tasks] : tasks;
+    const uniqueMap = new Map<string, TaskDeadlineItem>();
 
-  const tasks: TaskDeadlineItem[] = allTasksList;
+    combined.forEach((t) => {
+      if (t.id && !uniqueMap.has(t.id)) {
+        uniqueMap.set(t.id, t);
+      }
+    });
+
+    // Lọc bỏ các task trùng lặp cùng title + deadline trong vòng 1 phút
+    const uniqueTasks: TaskDeadlineItem[] = [];
+    const seenContent = new Set<string>();
+
+    uniqueMap.forEach((t) => {
+      const dateKey = extractDateStr(t.deadline || t.dueDate);
+      const timeKey = extractTimeStr(t.deadline || t.dueDate);
+      const contentKey = `${(t.title || '').trim().toLowerCase()}_${dateKey}_${timeKey}`;
+      if (!seenContent.has(contentKey)) {
+        seenContent.add(contentKey);
+        uniqueTasks.push(t);
+      }
+    });
+
+    return uniqueTasks;
+  }, [tasks, createdTasks]);
 
   // DEBUG LOG theo đúng yêu cầu đề bài
-  console.log("CALENDAR RAW TASKS:", tasks);
+  console.log("CALENDAR RAW TASKS:", allTasksList);
 
   // 2. Fetch Projects List for Quick Task Select dropdown
   const { data: projectOptions = [] } = useQuery<Array<{ id: string; name: string }>>({
@@ -328,6 +425,7 @@ export const CalendarPage: React.FC = () => {
   // Submit Quick Task handler
   const handleCreateQuickTask = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingTask) return; // Chặn request thứ 2 nếu đang gửi API
     if (!taskTitle.trim()) {
       toast.error('Vui lòng nhập tiêu đề công việc / sự kiện.');
       return;
@@ -366,10 +464,11 @@ export const CalendarPage: React.FC = () => {
       const rawRes = res.data;
       const newTask = (rawRes && rawRes.id) ? rawRes : (rawRes?.data || null);
       if (newTask && newTask.id) {
+        setTasks((prev) => [newTask, ...prev.filter((t) => t.id !== newTask.id)]);
         setCreatedTasks((prev) => [newTask, ...prev.filter((t) => t.id !== newTask.id)]);
-        queryClient.setQueriesData({ queryKey: ['calendar-events'] }, (oldData: any) => {
+        queryClient.setQueriesData({ queryKey: ['calendar-events', user?.id] }, (oldData: any) => {
           if (!oldData) return { projects: [], tasks: [newTask] };
-          const currentTasks = oldData.tasks || [];
+          const currentTasks = oldData.tasks || oldData.data?.tasks || [];
           const exists = currentTasks.some((t: any) => t.id === newTask.id);
           return {
             ...oldData,
@@ -392,29 +491,31 @@ export const CalendarPage: React.FC = () => {
     }
   };
 
-  // Delete task handler
+  // Delete task handler (Optimistic UI & Đồng bộ tức thì)
   const handleDeleteTask = async (taskId: string, title: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!window.confirm(`Bạn có chắc chắn muốn xóa "${title}"?`)) {
       return;
     }
+
+    // Optimistic UI: Lọc bỏ ngay lập tức taskId bị xóa ra khỏi cả 3 state: tasks, createdTasks, và cache React Query
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+    setCreatedTasks((prev) => prev.filter((t) => t.id !== taskId));
+
+    queryClient.setQueriesData({ queryKey: ['calendar-events', user?.id] }, (oldData: any) => {
+      if (!oldData) return { projects: [], tasks: [] };
+      const currentTasks = oldData.tasks || oldData.data?.tasks || [];
+      return {
+        ...oldData,
+        tasks: currentTasks.filter((t: any) => t.id !== taskId),
+      };
+    });
+
     const toastId = toast.loading('Đang xóa công việc...');
     try {
       await apiClient.delete(`/tasks/${taskId}`);
       toast.success('Đã xóa lịch hẹn/công việc thành công!', { id: toastId });
 
-      setCreatedTasks((prev) => prev.filter((t) => t.id !== taskId));
-
-      // Cập nhật ngay query cache
-      queryClient.setQueriesData({ queryKey: ['calendar-events'] }, (oldData: any) => {
-        if (!oldData) return { projects: [], tasks: [] };
-        return {
-          ...oldData,
-          tasks: (oldData.tasks || []).filter((t: any) => t.id !== taskId),
-        };
-      });
-
-      await refetchCalendar();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['calendar-events'] }),
         queryClient.invalidateQueries({ queryKey: ['tasks'] }),
@@ -422,14 +523,15 @@ export const CalendarPage: React.FC = () => {
       ]);
     } catch (error: any) {
       toast.error(error.response?.data?.message || 'Không thể xóa công việc.', { id: toastId });
+      await refetchCalendar();
     }
   };
 
   const pendingCount = useMemo(() => {
-    const pendingTasks = tasks.filter((t) => t.status !== 'DONE').length;
+    const pendingTasks = allTasksList.filter((t) => t.status !== 'DONE').length;
     const pendingProjects = projects.filter((p) => p.status !== 'COMPLETED').length;
     return pendingTasks + pendingProjects;
-  }, [tasks, projects]);
+  }, [allTasksList, projects]);
 
   // Build Calendar Days for the Month View (6 weeks = 42 cells)
   const calendarDays = useMemo(() => {
@@ -489,94 +591,193 @@ export const CalendarPage: React.FC = () => {
     return days;
   }, [year, month]);
 
+  // Mở Popup Tóm tắt lịch trình (hỗ trợ ngày mục tiêu cụ thể, ngày được chọn hoặc mặc định hôm nay)
+  const handleOpenVoiceSummary = (targetDate?: string | Date | null) => {
+    const chosenDate = targetDate || selectedDayEventsDate || new Date();
+    setSummaryTargetDate(chosenDate);
+    setIsSummaryModalOpen(true);
+  };
+
+  const handleCloseSummaryModal = () => {
+    setIsSummaryModalOpen(false);
+  };
+
+  // Tự động tạo công việc trực tiếp từ Voice Command (Có khóa chống lặp Mutex Lock)
+  const handleCreateQuickTaskDirect = async (params: {
+    title: string;
+    date: string;
+    time?: string;
+    priority?: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+  }) => {
+    // Khóa chống lặp (Mutex): nếu đang gửi API thì chặn không cho gọi thêm request thứ 2
+    if (isCreatingDirectTaskRef.current) return;
+    isCreatingDirectTaskRef.current = true;
+
+    const { title, date, time = '09:00', priority = 'MEDIUM' } = params;
+    if (!title || !title.trim()) {
+      isCreatingDirectTaskRef.current = false;
+      toast.error('Vui lòng cung cấp tiêu đề công việc.');
+      return;
+    }
+
+    const toastId = toast.loading(`⚡ Đang tự động thêm "${title.trim()}" vào ngày ${date}...`);
+    try {
+      const formattedTime = time && time.trim() ? (time.length === 5 ? `${time}:00` : time) : '09:00:00';
+      const [h, m] = formattedTime.split(':').map((num) => parseInt(num, 10) || 0);
+      const [y, mon, d] = date.split('-').map((num) => parseInt(num, 10));
+
+      let exactDateObj: Date;
+      if (y && mon && d) {
+        exactDateObj = new Date(y, mon - 1, d, h, m, 0);
+      } else {
+        exactDateObj = new Date();
+      }
+      const isoDeadline = exactDateObj.toISOString();
+
+      const res = await apiClient.post('/calendar/quick-task', {
+        title: title.trim(),
+        date,
+        time,
+        deadline: isoDeadline,
+        dueDate: isoDeadline,
+        projectId: 'PERSONAL',
+        priority,
+        description: 'Tự động tạo thông minh từ AI Voice Command',
+      });
+
+      const rawRes = res.data;
+      const newTask = (rawRes && rawRes.id) ? rawRes : (rawRes?.data || null);
+      if (newTask && newTask.id) {
+        setTasks((prev) => [newTask, ...prev.filter((t) => t.id !== newTask.id)]);
+        setCreatedTasks((prev) => [newTask, ...prev.filter((t) => t.id !== newTask.id)]);
+        queryClient.setQueriesData({ queryKey: ['calendar-events', user?.id] }, (oldData: any) => {
+          if (!oldData) return { projects: [], tasks: [newTask] };
+          const currentTasks = oldData.tasks || oldData.data?.tasks || [];
+          const exists = currentTasks.some((t: any) => t.id === newTask.id);
+          return {
+            ...oldData,
+            tasks: exists ? currentTasks.map((t: any) => t.id === newTask.id ? newTask : t) : [newTask, ...currentTasks],
+          };
+        });
+      }
+
+      // Tự động chuyển view lịch sang tháng của công việc nếu khác tháng đang xem
+      if (y && mon && (y !== year || mon - 1 !== month)) {
+        setCurrentDate(new Date(y, mon - 1, 1));
+      }
+
+      toast.success(
+        `🎉 Đã tự động thêm công việc "${title.trim()}" vào ngày ${date} lúc ${time}!`,
+        { id: toastId, duration: 4500 }
+      );
+
+      await refetchCalendar();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['calendar-events'] }),
+        queryClient.invalidateQueries({ queryKey: ['tasks'] }),
+        queryClient.invalidateQueries({ queryKey: ['my-work'] }),
+      ]);
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || 'Không thể tạo công việc tự động.', { id: toastId });
+    } finally {
+      // Mở khóa sau 1.5 giây để tránh double-request
+      setTimeout(() => {
+        isCreatingDirectTaskRef.current = false;
+      }, 1500);
+    }
+  };
+
   const handleVoiceCommand = (cmd: ParsedVoiceCommand) => {
-    const raw = cmd.rawText.trim();
-    const lower = raw.toLowerCase();
-
-    // 1. Điền câu nói vào ô tìm kiếm
-    setSearchQuery(raw);
-
-    // 2. TỰ ĐỘNG KÍCH HOẠT HÀNH ĐỘNG NGAY LẬP TỨC:
-    // + Nếu nhận diện câu có từ khóa "quá hạn" hoặc "cần xử lý": Tự động kích hoạt bộ lọc tab "Cần Xử Lý" trên Lịch
-    if (
-      cmd.filterTarget === 'PENDING' ||
-      lower.includes('quá hạn') ||
-      lower.includes('cần xử lý') ||
-      lower.includes('trễ hạn') ||
-      lower.includes('chưa xong')
-    ) {
-      setFilterType('PENDING');
-      const cleanSearch = raw
-        .replace(/(tìm|lọc|xem|kiểm tra|danh sách|các)?\s*(công việc|task|nhiệm vụ)?\s*(quá hạn|cần xử lý|trễ hạn|chưa xong)/gi, '')
-        .trim();
-      setSearchQuery(cleanSearch);
-      toast.success('🎙️ Đã tự động kích hoạt bộ lọc "Cần Xử Lý"!');
+    // 1. Ý ĐỊNH 1: TẠO CÔNG VIỆC / THÊM LỊCH HẸN (Intent: CREATE_TASK)
+    // TUYỆT ĐỐI KHÔNG điền vào thanh tìm kiếm hay kích hoạt bộ lọc!
+    if (cmd.actionType === 'CREATE_TASK' && cmd.taskData) {
+      const { title, date, time, priority } = cmd.taskData;
+      handleCreateQuickTaskDirect({ title, date, time, priority });
       return;
     }
 
-    // + Nếu nhận diện "tất cả": Chuyển về tab "Tất Cả"
-    if (
-      cmd.filterTarget === 'ALL' ||
-      lower === 'tất cả' ||
-      lower === 'toàn bộ' ||
-      lower.includes('tất cả') ||
-      lower.includes('toàn bộ')
-    ) {
-      setFilterType('ALL');
-      setSearchQuery('');
-      toast.success('🎙️ Đã chuyển về tab "Tất Cả"!');
+    // 2. Ý ĐỊNH 2: TÓM TẮT & BÁO CÁO NHANH BẰNG GIỌNG NÓI (Intent: SUMMARY_DATE hoặc SUMMARY)
+    // TUYỆT ĐỐI KHÔNG điền vào thanh tìm kiếm hay kích hoạt bộ lọc!
+    if (cmd.actionType === 'SUMMARY_DATE' || cmd.actionType === 'SUMMARY') {
+      handleOpenVoiceSummary(cmd.targetDate);
       return;
     }
 
-    // Nếu nhận diện "dự án"
-    if (
-      cmd.filterTarget === 'PROJECTS' ||
-      (lower.includes('dự án') && !lower.includes('tạo') && !lower.includes('thêm'))
-    ) {
-      setFilterType('PROJECTS');
-      const cleanSearch = raw.replace(/(tìm|lọc|xem|kiểm tra|danh sách)?\s*(dự án)/gi, '').trim();
-      setSearchQuery(cleanSearch);
-      toast.success('🎙️ Đã chuyển sang tab "Dự Án"!');
-      return;
-    }
+    // 3. Ý ĐỊNH 3: TÌM KIẾM & BỘ LỌC (Intent: FILTER_SEARCH)
+    // Chỉ kích hoạt khi câu nói thuần túy là tìm kiếm: "tìm...", "lọc...", "các việc quá hạn", "việc cần xử lý", "tất cả"
+    if (cmd.actionType === 'SEARCH') {
+      const raw = cmd.rawText.trim();
+      const lower = raw.toLowerCase();
 
-    // Nếu nhận diện "công việc"
-    if (
-      cmd.filterTarget === 'TASKS' ||
-      (lower.includes('công việc') && !lower.includes('tạo') && !lower.includes('thêm'))
-    ) {
-      setFilterType('TASKS');
-      const cleanSearch = raw.replace(/(tìm|lọc|xem|kiểm tra|danh sách)?\s*(công việc|task)/gi, '').trim();
-      setSearchQuery(cleanSearch);
-      toast.success('🎙️ Đã chuyển sang tab "Công Việc"!');
-      return;
-    }
-
-    // Lệnh tạo việc mới
-    if (cmd.actionType === 'CREATE_TASK') {
-      const title = cmd.taskData?.title || raw;
-      setTaskTitle(title);
-      if (cmd.taskData?.dueDate) {
-        setTaskDate(toDateKey(cmd.taskData.dueDate));
+      // Bộ lọc: Quá hạn / Cần xử lý
+      if (
+        cmd.filterTarget === 'PENDING' ||
+        lower.includes('quá hạn') ||
+        lower.includes('cần xử lý') ||
+        lower.includes('trễ hạn') ||
+        lower.includes('chưa xong')
+      ) {
+        setFilterType('PENDING');
+        const cleanSearch =
+          cmd.searchQuery ||
+          raw
+            .replace(/(tìm|lọc|xem|kiểm tra|danh sách|các)?\s*(công việc|task|nhiệm vụ)?\s*(quá hạn|cần xử lý|trễ hạn|chưa xong)/gi, '')
+            .trim();
+        setSearchQuery(cleanSearch);
+        toast.success('🎙️ Đã kích hoạt bộ lọc "Cần Xử Lý"!');
+        return;
       }
-      if (cmd.taskData?.priority) {
-        setTaskPriority(cmd.taskData.priority);
+
+      // Bộ lọc: Tất cả
+      if (
+        cmd.filterTarget === 'ALL' ||
+        lower === 'tất cả' ||
+        lower === 'toàn bộ' ||
+        lower.includes('tất cả') ||
+        lower.includes('toàn bộ')
+      ) {
+        setFilterType('ALL');
+        setSearchQuery('');
+        toast.success('🎙️ Đã chuyển về tab "Tất Cả"!');
+        return;
       }
-      setIsQuickTaskModalOpen(true);
-      toast.success(`🎙️ Đã nhận diện lệnh tạo việc: "${title}"`);
+
+      // Bộ lọc: Dự án
+      if (
+        cmd.filterTarget === 'PROJECTS' ||
+        (lower.includes('dự án') && !lower.includes('tạo') && !lower.includes('thêm'))
+      ) {
+        setFilterType('PROJECTS');
+        const cleanSearch = cmd.searchQuery || raw.replace(/(tìm|lọc|xem|kiểm tra|danh sách)?\s*(dự án)/gi, '').trim();
+        setSearchQuery(cleanSearch);
+        toast.success('🎙️ Đã chuyển sang tab "Dự Án"!');
+        return;
+      }
+
+      // Bộ lọc: Công việc
+      if (
+        cmd.filterTarget === 'TASKS' ||
+        (lower.includes('công việc') && !lower.includes('tạo') && !lower.includes('thêm'))
+      ) {
+        setFilterType('TASKS');
+        const cleanSearch = cmd.searchQuery || raw.replace(/(tìm|lọc|xem|kiểm tra|danh sách)?\s*(công việc|task)/gi, '').trim();
+        setSearchQuery(cleanSearch);
+        toast.success('🎙️ Đã chuyển sang tab "Công Việc"!');
+        return;
+      }
+
+      // Tìm kiếm từ khóa thuần túy
+      const cleanSearch = cmd.searchQuery || raw.replace(/^(tìm|lọc|tra cứu|xem|kiểm tra)\s+/i, '').trim();
+      setSearchQuery(cleanSearch || raw);
+      toast.success(`🔍 Đã lọc danh sách theo: "${cleanSearch || raw}"`);
       return;
     }
-
-    // + Nếu là lệnh tìm kiếm: Tự động chạy hàm lọc danh sách công việc thời gian thực theo từ khóa vừa nói
-    const cleanSearch = raw.replace(/^(tìm|lọc|tra cứu|xem|kiểm tra)\s+/i, '').trim();
-    setSearchQuery(cleanSearch || raw);
-    toast.success(`🔍 Đã tự động lọc danh sách theo: "${cleanSearch || raw}"`);
   };
 
   // Lọc danh sách công việc và dự án theo bộ lọc và tìm kiếm thời gian thực
   const filteredTasks = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    return tasks.filter((t) => {
+    return allTasksList.filter((t) => {
       if (filterType === 'PROJECTS') return false;
       if (filterType === 'PENDING' && t.status === 'DONE') return false;
       if (q && !t.title.toLowerCase().includes(q) && (!t.projectName || !t.projectName.toLowerCase().includes(q))) {
@@ -584,7 +785,7 @@ export const CalendarPage: React.FC = () => {
       }
       return true;
     });
-  }, [tasks, filterType, searchQuery]);
+  }, [allTasksList, filterType, searchQuery]);
 
   const filteredProjects = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -616,7 +817,7 @@ export const CalendarPage: React.FC = () => {
       map.set(dateKey, existing);
     });
 
-    tasks.forEach((t) => {
+    allTasksList.forEach((t) => {
       const rawDeadline = t.deadline || t.dueDate;
       if (!rawDeadline) return;
       const dateKey = toDateKey(rawDeadline);
@@ -627,16 +828,16 @@ export const CalendarPage: React.FC = () => {
     });
 
     return map;
-  }, [projects, tasks]);
+  }, [projects, allTasksList]);
 
   // Selected Day Items for Detail Modal
   const selectedDayItems = useMemo(() => {
     if (!selectedDayEventsDate) return { projects: [], tasks: [] };
     const key = toDateKey(selectedDayEventsDate);
     const dayProjects = projects.filter((p) => toDateKey(p.deadline || p.endDate) === key);
-    const dayTasks = tasks.filter((t) => toDateKey(t.deadline || t.dueDate) === key);
+    const dayTasks = allTasksList.filter((t) => toDateKey(t.deadline || t.dueDate) === key);
     return { projects: dayProjects, tasks: dayTasks };
-  }, [selectedDayEventsDate, projects, tasks]);
+  }, [selectedDayEventsDate, projects, allTasksList]);
 
   return (
     <div className="min-h-screen bg-slate-50/60 p-4 transition-colors duration-200 dark:bg-slate-950 sm:p-6 lg:p-8 space-y-6">
@@ -671,6 +872,17 @@ export const CalendarPage: React.FC = () => {
           >
             <Mic className="w-4 h-4 animate-pulse" />
             <span>🎙️ Giọng Nói AI</span>
+          </button>
+
+          {/* AI Voice Summary Button */}
+          <button
+            type="button"
+            onClick={() => handleOpenVoiceSummary()}
+            className="flex items-center gap-2 px-3.5 py-2.5 text-xs font-extrabold text-slate-800 dark:text-white bg-white dark:bg-slate-800 border border-purple-200 dark:border-purple-800/60 rounded-2xl shadow-sm hover:border-purple-400 dark:hover:border-purple-600 hover:bg-purple-50/50 dark:hover:bg-purple-950/30 active:scale-95 transition cursor-pointer"
+            title="Xem và nghe tóm tắt toàn bộ lịch trình bằng giọng nói AI"
+          >
+            <Sparkles className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+            <span>✨ Tóm Tắt Lịch Trình</span>
           </button>
 
           {/* Add Task Button */}
@@ -731,7 +943,7 @@ export const CalendarPage: React.FC = () => {
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200'
             }`}
           >
-            Tất Cả ({projects.length + tasks.length})
+            Tất Cả ({projects.length + allTasksList.length})
           </button>
           <button
             type="button"
@@ -753,7 +965,7 @@ export const CalendarPage: React.FC = () => {
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200'
             }`}
           >
-            Công Việc ({tasks.length})
+            Công Việc ({allTasksList.length})
           </button>
           <button
             type="button"
@@ -861,11 +1073,11 @@ export const CalendarPage: React.FC = () => {
                   e.stopPropagation();
                   handleTaskDropOnDay(cell.date);
                 }}
-                className={`min-h-[125px] p-2 flex flex-col justify-between transition group cursor-pointer ${
+                className={`min-h-[125px] p-2 flex flex-col justify-between transition group/cell cursor-pointer ${
                   !cell.isCurrentMonth
                     ? 'bg-slate-50/40 dark:bg-slate-950/40 opacity-40 hover:opacity-75'
                     : isCellHasTasks
-                    ? 'bg-indigo-50/40 hover:bg-indigo-50/70 dark:bg-indigo-950/25 dark:hover:bg-indigo-950/45'
+                    ? 'bg-indigo-50/30 hover:bg-indigo-50/60 dark:bg-indigo-950/20 dark:hover:bg-indigo-950/40'
                     : 'bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800/50'
                 } ${cell.isToday ? 'ring-2 ring-indigo-500 ring-inset bg-indigo-50/50 dark:bg-indigo-950/50' : ''} ${
                   dragOverDateKey === cell.dateKey
@@ -883,8 +1095,8 @@ export const CalendarPage: React.FC = () => {
                           cell.isToday
                             ? 'bg-indigo-600 text-white font-black shadow-sm'
                             : isCellHasTasks
-                            ? 'font-black text-indigo-950 dark:text-indigo-100 group-hover:text-indigo-600'
-                            : 'font-medium text-slate-800 dark:text-slate-200 group-hover:text-indigo-600'
+                            ? 'font-black text-indigo-950 dark:text-indigo-100 group-hover/cell:text-indigo-600'
+                            : 'font-medium text-slate-800 dark:text-slate-200 group-hover/cell:text-indigo-600'
                         }`}
                       >
                         {cell.date.getDate()}
@@ -902,7 +1114,7 @@ export const CalendarPage: React.FC = () => {
                         e.stopPropagation();
                         handleOpenCreateModal(cell.date);
                       }}
-                      className="opacity-0 group-hover:opacity-100 p-1 rounded-md bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-slate-800 dark:text-indigo-400 transition"
+                      className="opacity-0 group-hover/cell:opacity-100 p-1 rounded-md bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-slate-800 dark:text-indigo-400 transition"
                       title="Thêm việc cho ngày này"
                     >
                       <Plus className="w-3 h-3" />
@@ -910,17 +1122,23 @@ export const CalendarPage: React.FC = () => {
                   </div>
 
                   {totalCount > 0 && (
-                    <span
-                      className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded-full ${
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedDayEventsDate(cell.date);
+                      }}
+                      className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded-full transition cursor-pointer hover:scale-105 active:scale-95 ${
                         hasDueSoon
                           ? 'bg-amber-100 text-amber-800 animate-pulse ring-1 ring-amber-400 dark:bg-amber-950/80 dark:text-amber-300'
                           : hasOverdue
                           ? 'bg-rose-100 text-rose-700 animate-pulse ring-1 ring-rose-400 dark:bg-rose-950/60 dark:text-rose-300'
-                          : 'bg-indigo-100/80 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300'
+                          : 'bg-indigo-100/90 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 border border-indigo-200/50'
                       }`}
+                      title="Bấm để xem danh sách chi tiết các công việc trong ngày"
                     >
                       {totalCount} việc
-                    </span>
+                    </button>
                   )}
                 </div>
 
@@ -942,20 +1160,12 @@ export const CalendarPage: React.FC = () => {
                     </div>
                   ))}
 
-                  {/* BẮT BUỘC RENDER THẺ SỰ KIỆN: Nếu có task trong ngày, vẽ ngay thẻ note sự kiện */}
+                  {/* BẮT BUỘC RENDER THẺ SỰ KIỆN: Nếu có task trong ngày, vẽ ngay thẻ note sự kiện chuẩn xác */}
                   {displayTasks.slice(0, 2).map((t) => {
                     const taskDue = t.deadline || t.dueDate;
                     const isOverdue = t.isOverdue || (t.status !== 'DONE' && new Date(taskDue) < new Date());
                     const isUrgent = t.priority === 'URGENT' || isOverdue;
                     const timeStr = extractTimeStr(taskDue);
-
-                    // Chấm tròn màu xanh/vàng/đỏ theo trạng thái
-                    let dotColor = 'bg-amber-500';
-                    if (t.status === 'DONE') {
-                      dotColor = 'bg-emerald-500';
-                    } else if (isUrgent) {
-                      dotColor = 'bg-rose-500 animate-pulse';
-                    }
 
                     return (
                       <div
@@ -979,52 +1189,64 @@ export const CalendarPage: React.FC = () => {
                           e.stopPropagation();
                           setSelectedTaskId(t.id);
                         }}
-                        className={`bg-indigo-50 border border-indigo-200 text-indigo-900 rounded p-1 mb-1 text-xs font-semibold shadow-xs flex items-center justify-between gap-1.5 cursor-pointer active:cursor-grabbing hover:bg-indigo-100 dark:bg-indigo-950/60 dark:border-indigo-800 dark:text-indigo-200 transition select-none group/task ${
+                        className={`bg-indigo-50 border border-indigo-200 text-indigo-900 font-medium text-xs px-2 py-1 rounded shadow-xs mb-1 flex items-center justify-between group cursor-pointer active:cursor-grabbing hover:bg-indigo-100 hover:border-indigo-300 dark:bg-indigo-950/60 dark:border-indigo-800 dark:text-indigo-200 transition select-none ${
                           draggingTask?.id === t.id ? 'opacity-40 ring-1 ring-indigo-400' : ''
                         } ${
-                          isUrgent ? 'border-rose-300 text-rose-700 bg-rose-50/90 dark:bg-rose-950/60 dark:text-rose-300' : ''
+                          isUrgent ? 'border-rose-300 text-rose-800 bg-rose-50/90 dark:bg-rose-950/60 dark:text-rose-200' : ''
                         }`}
-                        title={`${t.isPersonal ? 'Lịch cá nhân' : 'Dự án'}: ${t.title} (${timeStr || 'Hạn chót'})`}
+                        title={`${t.isPersonal ? '⭐ Lịch cá nhân' : '📁 Dự án'}: ${t.title}${timeStr ? ` (${timeStr})` : ''}`}
                       >
                         <div className="flex items-center gap-1.5 truncate min-w-0 flex-1">
-                          {/* Chấm tròn trạng thái */}
-                          <span className={`w-2 h-2 rounded-full shrink-0 ${dotColor}`} />
-                          {/* Giờ hiển thị: Lấy giờ:phút trực tiếp từ chuỗi deadline (VD: "21:34") */}
+                          {/* Chấm trạng thái: 🟢 Done, 🟡 Doing, 🔴 Overdue/Urgent */}
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${
+                              t.status === 'DONE'
+                                ? 'bg-emerald-500'
+                                : isUrgent
+                                ? 'bg-rose-500 animate-pulse'
+                                : 'bg-amber-500'
+                            }`}
+                            title={t.status === 'DONE' ? 'Đã hoàn thành' : isUrgent ? 'Quá hạn / Khẩn cấp' : 'Đang làm'}
+                          />
+
+                          {/* Giờ hẹn dạng mono đậm: 19:51, 21:33 */}
                           {timeStr && (
-                            <span className="text-[10px] font-semibold font-mono shrink-0 opacity-80">
+                            <span className="font-mono font-bold text-[11px] shrink-0 text-indigo-950 dark:text-indigo-200">
                               {timeStr}
                             </span>
                           )}
-                          {/* Tên công việc (VD: "ge") */}
+
+                          {/* Tiêu đề task ngắn gọn kèm tooltip xem đầy đủ khi hover */}
                           <span
                             className={`truncate ${
                               t.status === 'DONE' ? 'line-through opacity-70' : ''
                             }`}
+                            title={t.title}
                           >
                             {t.title}
                           </span>
                         </div>
 
-                        {/* Quick action buttons on hover */}
-                        <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover/task:opacity-100 transition-opacity">
+                        {/* Quick action buttons on hover: 👁️ xem chi tiết và 🗑️ xóa nhanh */}
+                        <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity ml-1">
                           <button
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
                               setSelectedTaskId(t.id);
                             }}
-                            className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 transition"
+                            className="p-1 rounded hover:bg-indigo-200/70 text-indigo-700 dark:text-indigo-300 dark:hover:bg-indigo-800/80 transition"
                             title="Xem chi tiết"
                           >
-                            <Eye className="w-2.5 h-2.5" />
+                            <Eye className="w-3 h-3" />
                           </button>
                           <button
                             type="button"
                             onClick={(e) => handleDeleteTask(t.id, t.title, e)}
-                            className="p-0.5 rounded hover:bg-rose-200 text-rose-600 dark:hover:bg-rose-950/80 transition"
+                            className="p-1 rounded hover:bg-rose-200/80 text-rose-600 dark:text-rose-400 dark:hover:bg-rose-900/80 transition"
                             title="Xóa công việc"
                           >
-                            <Trash2 className="w-2.5 h-2.5" />
+                            <Trash2 className="w-3 h-3" />
                           </button>
                         </div>
                       </div>
@@ -1473,6 +1695,16 @@ export const CalendarPage: React.FC = () => {
         onClose={() => setIsVoiceModalOpen(false)}
         onExecuteCommand={handleVoiceCommand}
         title="AI Voice Command - Thêm Việc & Lịch Hẹn Bằng Giọng Nói"
+      />
+
+      {/* AI Voice Summary Modal */}
+      <ScheduleSummaryModal
+        isOpen={isSummaryModalOpen}
+        onClose={handleCloseSummaryModal}
+        targetDate={summaryTargetDate}
+        tasks={allTasksList}
+        projects={projects}
+        onSelectTask={(taskId) => setSelectedTaskId(taskId)}
       />
     </div>
   );

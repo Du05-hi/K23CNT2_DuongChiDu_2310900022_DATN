@@ -954,17 +954,27 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
 };
 
 /**
- * 6. Xóa task, emit 'task:deleted', tạo activity log
+ * 6. Xóa task, dọn dẹp quan hệ và thông báo, phát tín hiệu Socket.io toàn hệ thống
+ * Cho phép: Admin, Manager dự án, người tạo task (createdById), hoặc người nhận task (assigneeId)
  */
 export const deleteTask = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const userId = req.user?.id;
 
+    if (!userId || !req.user) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
+
     const task = await prisma.task.findUnique({
       where: { id },
       include: {
-        project: true,
+        project: {
+          include: {
+            members: true,
+          },
+        },
         attachments: { select: { fileUrl: true } },
       },
     });
@@ -973,15 +983,54 @@ export const deleteTask = async (req: AuthenticatedRequest, res: Response): Prom
       res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
       return;
     }
-    if (!req.user || !(await canManageProject(req.user, task.projectId))) {
-      res.status(403).json({ success: false, message: 'Chỉ quản trị viên hoặc quản lý dự án mới được xóa công việc.' });
+
+    // Kiểm tra quyền xóa: Cho phép Admin, Quản lý dự án, người tạo task hoặc người nhận việc
+    const isProjectManager =
+      task.project.createdById === userId ||
+      (req.user.role === 'MANAGER' && (
+        (req.user.departmentId && task.project.departmentId === req.user.departmentId) ||
+        (await canManageProject(req.user, task.projectId))
+      )) ||
+      task.project.members.some((m) => m.userId === userId && m.role === 'PROJECT_MANAGER');
+
+    const canDelete =
+      req.user.role === 'ADMIN' ||
+      task.createdById === userId ||
+      task.assigneeId === userId ||
+      isProjectManager;
+
+    if (!canDelete) {
+      res.status(403).json({
+        success: false,
+        message: 'Bạn không có quyền xóa công việc này.',
+      });
       return;
     }
 
+    // 1. Dọn dẹp Notification liên quan đến task để chuông không tiếp tục nhắc việc đã xóa
+    await prisma.notification.deleteMany({
+      where: {
+        relatedId: id,
+      },
+    });
+
+    // 2. Dọn dẹp comment, subTask, attachment records trước khi xóa task
+    await prisma.comment.deleteMany({
+      where: { taskId: id },
+    });
+    await prisma.subTask.deleteMany({
+      where: { taskId: id },
+    });
+    await prisma.taskAttachment.deleteMany({
+      where: { taskId: id },
+    });
+
+    // 3. Xóa chính thức bản ghi Task trong Database
     await prisma.task.delete({
       where: { id },
     });
 
+    // 4. Dọn file đính kèm vật lý trên ổ đĩa
     const cleanupResults = await Promise.allSettled(
       task.attachments.map((attachment) =>
         fs.promises.unlink(
@@ -998,12 +1047,19 @@ export const deleteTask = async (req: AuthenticatedRequest, res: Response): Prom
       }
     });
 
+    // 5. Phát tín hiệu Socket.io toàn hệ thống và trong room dự án
     const io = req.app.get('io');
     if (io) {
-      io.to(`project:${task.projectId}`).emit('task:deleted', {
-        taskId: id,
-        projectId: task.projectId,
-      });
+      io.emit('task:deleted', { taskId: id, projectId: task.projectId });
+      io.emit('calendar:refresh');
+      try {
+        io.to(`project:${task.projectId}`).emit('task:deleted', {
+          taskId: id,
+          projectId: task.projectId,
+        });
+      } catch (err) {
+        // silent catch
+      }
     }
 
     let activityLogWarning = false;

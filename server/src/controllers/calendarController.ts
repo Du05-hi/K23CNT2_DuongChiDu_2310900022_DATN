@@ -3,10 +3,13 @@ import { prisma } from '../config/prisma';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 import { logActivity } from '../services/activityLogService';
 import { createNotification, sendRealtimeNotification } from '../services/notificationService';
+import { parseVoiceIntent } from '../services/geminiService';
 
 /**
  * Lấy toàn bộ sự kiện và công việc trên lịch biểu (Calendar Matrix)
- * Bao gồm cả dự án và nhiệm vụ liên quan đến người dùng hoặc toàn công ty
+ * Phân quyền chuẩn xác:
+ * - Lịch cá nhân: Tuyệt đối cô lập 100%, chỉ trả về của chính user tạo
+ * - Lịch dự án: Chỉ trả về cho người được giao, người tạo hoặc quản lý/thành viên dự án
  */
 export const getCalendarEvents = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
@@ -16,47 +19,42 @@ export const getCalendarEvents = async (req: AuthenticatedRequest, res: Response
       return;
     }
 
-    const { month, year } = req.query;
+    const currentUserId = user.id;
     const now = new Date();
 
-    // 1. Lọc Dự Án: Người dùng là thành viên, người tạo, hoặc quyền ADMIN/MANAGER
-    // TUYỆT ĐỐI LOẠI TRỪ dự án cá nhân & lịch hẹn khỏi danh sách Project trên Lịch biểu
-    const excludePersonalCondition = {
+    // Điều kiện nhận diện dự án cá nhân & lịch hẹn riêng
+    const isPersonalProjectCondition = {
+      OR: [
+        { name: 'Công việc cá nhân & Lịch hẹn' },
+        { name: { contains: 'cá nhân' } },
+        { name: { contains: 'lịch hẹn' } },
+      ],
+    };
+
+    const excludePersonalProjectCondition = {
       NOT: {
-        name: 'Công việc cá nhân & Lịch hẹn',
+        OR: [
+          { name: 'Công việc cá nhân & Lịch hẹn' },
+          { name: { contains: 'cá nhân' } },
+          { name: { contains: 'lịch hẹn' } },
+        ],
       },
     };
 
-    let projectWhere: any = {};
-    if (user.role === 'ADMIN') {
-      projectWhere = { ...excludePersonalCondition };
-    } else if (user.role === 'MANAGER') {
-      projectWhere = {
-        AND: [
-          excludePersonalCondition,
-          {
-            OR: [
-              { createdById: user.id },
-              { members: { some: { userId: user.id } } },
-              ...(user.departmentId ? [{ departmentId: user.departmentId }] : []),
-            ],
-          },
-        ],
-      };
-    } else {
-      // EMPLOYEE: tham gia làm thành viên hoặc người tạo
-      projectWhere = {
-        AND: [
-          excludePersonalCondition,
-          {
-            OR: [
-              { members: { some: { userId: user.id } } },
-              { createdById: user.id },
-            ],
-          },
-        ],
-      };
-    }
+    // 1. Lọc Dự Án: Tuyệt đối loại trừ dự án cá nhân khỏi danh sách Project trên Lịch biểu
+    // Chỉ trả về các dự án mà user là người tạo hoặc thành viên tham gia
+    const projectWhere: any = {
+      AND: [
+        excludePersonalProjectCondition,
+        {
+          OR: [
+            { createdById: currentUserId },
+            { members: { some: { userId: currentUserId } } },
+            ...(user.role === 'MANAGER' && user.departmentId ? [{ departmentId: user.departmentId }] : []),
+          ],
+        },
+      ],
+    };
 
     const projects = await prisma.project.findMany({
       where: projectWhere,
@@ -67,30 +65,31 @@ export const getCalendarEvents = async (req: AuthenticatedRequest, res: Response
       orderBy: { endDate: 'asc' },
     });
 
-    // 2. Lọc Nhiệm Vụ: ĐẢM BẢO KHÔNG BỊ CHẶN BỞI BẤT KỲ ĐIỀU KIỆN LỌC PHÒNG BAN HAY DỰ ÁN NÀO đối với task do chính user tạo hoặc được giao
-    let taskWhere: any = {};
-    if (user.role === 'ADMIN') {
-      taskWhere = {};
-    } else if (user.role === 'MANAGER') {
-      taskWhere = {
-        OR: [
-          { createdById: user.id },
-          { assigneeId: user.id },
-          { project: { createdById: user.id } },
-          { project: { members: { some: { userId: user.id } } } },
-          ...(user.departmentId ? [{ project: { departmentId: user.departmentId } }] : []),
-        ],
-      };
-    } else {
-      taskWhere = {
-        OR: [
-          { createdById: user.id },
-          { assigneeId: user.id },
-          { project: { createdById: user.id } },
-          { project: { members: { some: { userId: user.id } } } },
-        ],
-      };
-    }
+    // 2. Lọc Nhiệm Vụ (Tasks):
+    // - Việc cá nhân / Lịch hẹn riêng: BẮT BUỘC chỉ trả về task do CHÍNH USER ĐÓ TẠO: { createdById: currentUserId }.
+    //   Tuyệt đối không để Admin, Manager hay bất kỳ ai khác thấy lịch hẹn cá nhân của người khác.
+    // - Việc dự án: Chỉ trả về task mà user là: Người được giao việc (assigneeId: currentUserId),
+    //   Người tạo (createdById: currentUserId), hoặc Quản lý/Thành viên của dự án đó.
+    //   Không trả về task của những dự án mà user không tham gia.
+    const taskWhere: any = {
+      OR: [
+        // Nhánh 1: Việc cá nhân / Lịch hẹn riêng -> CHỈ của chính user tạo
+        {
+          project: isPersonalProjectCondition,
+          createdById: currentUserId,
+        },
+        // Nhánh 2: Công việc dự án -> User là người được giao, người tạo hoặc tham gia dự án
+        {
+          project: excludePersonalProjectCondition,
+          OR: [
+            { assigneeId: currentUserId },
+            { createdById: currentUserId },
+            { project: { createdById: currentUserId } },
+            { project: { members: { some: { userId: currentUserId } } } },
+          ],
+        },
+      ],
+    };
 
     const tasks = await prisma.task.findMany({
       where: taskWhere,
@@ -149,6 +148,7 @@ export const getCalendarEvents = async (req: AuthenticatedRequest, res: Response
         assigneeId: t.assigneeId,
         assigneeName: t.assignee?.name || (t.assigneeId === user.id ? user.name : 'Chưa giao'),
         assigneeAvatar: t.assignee?.avatar,
+        createdById: t.createdById,
         isPersonal,
         isDueSoon,
         isOverdue,
@@ -158,10 +158,10 @@ export const getCalendarEvents = async (req: AuthenticatedRequest, res: Response
     res.status(200).json({
       success: true,
       data: {
-        projects: formattedProjects,
         tasks: formattedTasks,
-        totalProjects: formattedProjects.length,
+        projects: formattedProjects,
         totalTasks: formattedTasks.length,
+        totalProjects: formattedProjects.length,
       },
     });
   } catch (error: any) {
@@ -190,6 +190,45 @@ export const createQuickCalendarTask = async (req: AuthenticatedRequest, res: Re
 
     if (!title || typeof title !== 'string' || !title.trim()) {
       res.status(400).json({ success: false, message: 'Vui lòng nhập tiêu đề công việc / sự kiện.' });
+      return;
+    }
+
+    // 0. CHỐNG TẠO TRÙNG LẶP (IDEMPOTENCY / DEDUPLICATION):
+    // Trong vòng 5 giây trước đó nếu cùng user này đã vừa tạo một task với cùng tiêu đề thì trả về luôn task cũ
+    const fiveSecondsAgo = new Date(Date.now() - 5000);
+    const existingTask = await prisma.task.findFirst({
+      where: {
+        createdById: user.id,
+        title: title.trim(),
+        createdAt: { gte: fiveSecondsAgo },
+      },
+      include: {
+        project: { select: { id: true, name: true } },
+        assignee: { select: { id: true, name: true, avatar: true } },
+      },
+    });
+
+    if (existingTask) {
+      const isPersonal = !projectId || projectId === 'PERSONAL' || projectId === '__personal__';
+      res.status(200).json({
+        success: true,
+        message: 'Công việc đã được tạo thành công (chống trùng lặp).',
+        data: {
+          id: existingTask.id,
+          title: existingTask.title,
+          description: existingTask.description,
+          dueDate: existingTask.dueDate ? existingTask.dueDate.toISOString() : null,
+          deadline: existingTask.dueDate ? existingTask.dueDate.toISOString() : null,
+          status: existingTask.status,
+          priority: existingTask.priority,
+          projectId: existingTask.projectId,
+          projectName: existingTask.project?.name || 'Công việc cá nhân & Lịch hẹn',
+          assigneeId: existingTask.assigneeId,
+          assigneeName: existingTask.assignee?.name,
+          assigneeAvatar: existingTask.assignee?.avatar,
+          isPersonal,
+        },
+      });
       return;
     }
 
@@ -297,6 +336,10 @@ export const createQuickCalendarTask = async (req: AuthenticatedRequest, res: Re
     if (io) {
       try {
         io.to(`user:${user.id}`).emit('task:created', newTask);
+        if (!isPersonalChoice) {
+          io.to(`project:${targetProjectId}`).emit('task:created', newTask);
+          io.emit('calendar:refresh');
+        }
       } catch (err) {
         console.warn('[Socket] Lỗi emit task:created:', err);
       }
@@ -318,6 +361,7 @@ export const createQuickCalendarTask = async (req: AuthenticatedRequest, res: Re
         assigneeId: newTask.assigneeId,
         assigneeName: newTask.assignee?.name || user.name,
         assigneeAvatar: newTask.assignee?.avatar,
+        createdById: newTask.createdById,
         isPersonal: isPersonalChoice,
         isDueSoon: false,
         isOverdue: false,
@@ -438,4 +482,44 @@ export const getCalendarReminders = async (req: AuthenticatedRequest, res: Respo
     });
   }
 };
+
+/**
+ * Endpoint AI bóc tách ý định giọng nói tiếng Việt cho Lịch biểu
+ * Nhận chuỗi { text: string } và trả về cấu trúc:
+ * {
+ *   intent: 'CREATE_TASK' | 'SUMMARY' | 'FILTER',
+ *   confidence: number,
+ *   data: { title, date, time, deadline, priority, filterTarget, searchQuery }
+ * }
+ */
+export const parseCalendarVoiceIntent = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
+
+    const { text } = req.body;
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      res.status(400).json({ success: false, message: 'Nội dung câu lệnh giọng nói không được để trống.' });
+      return;
+    }
+
+    const parsedResult = await parseVoiceIntent(text.trim());
+
+    res.status(200).json({
+      success: true,
+      data: parsedResult,
+    });
+  } catch (error: any) {
+    console.error('Lỗi parseCalendarVoiceIntent:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi phân tích câu lệnh giọng nói.',
+      error: error.message,
+    });
+  }
+};
+
 

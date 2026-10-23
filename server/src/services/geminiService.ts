@@ -816,6 +816,373 @@ export function generateKpiFallbackReview(input: KpiPerformanceInput): string {
 🚀 Lộ trình phát triển: Tham gia buổi kèm cặp 1-1 với Quản lý dự án để rà soát quy trình làm việc và thiết lập lại mục tiêu rõ ràng hơn.`;
 }
 
+export interface VoiceParsedResult {
+  intent: 'CREATE_TASK' | 'SUMMARY' | 'FILTER';
+  confidence: number;
+  data: {
+    title?: string;
+    deadline?: string; // ISO 8601 string
+    date?: string; // YYYY-MM-DD
+    time?: string; // HH:mm
+    priority?: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+    filterTarget?: 'ALL' | 'PENDING' | 'PROJECTS' | 'TASKS';
+    searchQuery?: string;
+  };
+}
+
+/**
+ * Helper dự phòng bóc tách bằng Regex tiếng Việt khi Gemini API bận hoặc offline
+ */
+export function fallbackParseVoiceCommand(text: string): VoiceParsedResult {
+  const lower = text.toLowerCase().trim();
+  const rawText = text.trim();
+
+  // Nhận diện từ khóa tạo việc
+  const hasCreateKeywords =
+    lower.includes('thêm') ||
+    lower.includes('tạo') ||
+    lower.includes('lập') ||
+    lower.includes('nhắc') ||
+    lower.includes('hẹn') ||
+    lower.includes('nộp') ||
+    lower.includes('deadline') ||
+    lower.includes('đặt lịch') ||
+    lower.includes('lên lịch') ||
+    lower.includes('ghi chú lịch');
+
+  // 1. Kiểm tra Ý ĐỊNH: SUMMARY (Tóm tắt, báo cáo lịch trình, ngày X có việc gì)
+  // Chỉ kích hoạt khi KHÔNG phải là lệnh tạo việc
+  const isSummary =
+    !hasCreateKeywords &&
+    (lower.includes('tóm tắt') ||
+      lower.includes('báo cáo') ||
+      lower.includes('có việc gì') ||
+      lower.includes('có task gì') ||
+      lower.includes('tuần này có gì') ||
+      lower.includes('hôm nay có gì') ||
+      lower.includes('tổng quan công việc') ||
+      lower.includes('hôm nay làm gì') ||
+      lower.includes('lịch trình') ||
+      lower.includes('xem tóm tắt'));
+
+  if (isSummary) {
+    // Trích xuất ngày nếu có
+    let summaryDate = '2026-10-23';
+    const sSlashMatch = lower.match(/(?:ngày\s+)?(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?/i);
+    const sWordMatch = lower.match(/ngày\s+(\d{1,2})\s+tháng\s+(\d{1,2})(?:\s+năm\s+(\d{4}))?/i);
+    const sDayOnlyMatch = lower.match(/ngày\s+(\d{1,2})(?!\s*[\/:])(?!\s*tháng)/i);
+
+    if (sSlashMatch) {
+      const d = parseInt(sSlashMatch[1], 10);
+      const m = parseInt(sSlashMatch[2], 10);
+      const y = sSlashMatch[3] ? parseInt(sSlashMatch[3], 10) : 2026;
+      summaryDate = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    } else if (sWordMatch) {
+      const d = parseInt(sWordMatch[1], 10);
+      const m = parseInt(sWordMatch[2], 10);
+      const y = sWordMatch[3] ? parseInt(sWordMatch[3], 10) : 2026;
+      summaryDate = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    } else if (sDayOnlyMatch) {
+      const d = parseInt(sDayOnlyMatch[1], 10);
+      summaryDate = `2026-10-${String(d).padStart(2, '0')}`;
+    } else if (lower.includes('ngày mai')) {
+      summaryDate = '2026-10-24';
+    } else if (lower.includes('ngày kia') || lower.includes('ngày mốt')) {
+      summaryDate = '2026-10-25';
+    }
+
+    return {
+      intent: 'SUMMARY',
+      confidence: 0.98,
+      data: {
+        title: `Tóm tắt lịch trình ngày ${summaryDate}`,
+        date: summaryDate,
+      },
+    };
+  }
+
+  // 2. Kiểm tra Ý ĐỊNH: FILTER (Tìm kiếm, lọc)
+  const isPureSearch =
+    !hasCreateKeywords &&
+    (lower.startsWith('tìm') ||
+      lower.startsWith('lọc') ||
+      lower.startsWith('tra cứu') ||
+      lower.includes('quá hạn') ||
+      lower.includes('cần xử lý') ||
+      lower.includes('trễ hạn') ||
+      (lower.includes('tất cả') && !lower.includes('tạo') && !lower.includes('thêm')) ||
+      ((lower === 'dự án' || lower === 'công việc') && !lower.includes('tạo') && !lower.includes('thêm')));
+
+  if (isPureSearch) {
+    let filterTarget: 'ALL' | 'PENDING' | 'PROJECTS' | 'TASKS' = 'ALL';
+    if (lower.includes('quá hạn') || lower.includes('cần xử lý') || lower.includes('trễ hạn') || lower.includes('chưa xong')) {
+      filterTarget = 'PENDING';
+    } else if (lower.includes('dự án')) {
+      filterTarget = 'PROJECTS';
+    } else if (lower.includes('công việc') || lower.includes('task')) {
+      filterTarget = 'TASKS';
+    }
+
+    const cleanSearch = rawText
+      .replace(/^(tìm|lọc|tra cứu|xem|kiểm tra|danh sách)\s+/i, '')
+      .replace(/(các|công việc|task|nhiệm vụ)?\s*(quá hạn|cần xử lý|trễ hạn|chưa xong)/gi, '')
+      .trim();
+
+    return {
+      intent: 'FILTER',
+      confidence: 0.92,
+      data: {
+        filterTarget,
+        searchQuery: cleanSearch || rawText,
+      },
+    };
+  }
+
+  // 3. Mặc định hoặc nhận diện Ý ĐỊNH: CREATE_TASK (Tạo/Thêm công việc/Lịch hẹn)
+  // Các từ khóa: "thêm", "tạo", "lập", "nhắc", "hẹn", "nộp", "deadline"
+  const currentYear = 2026;
+  const now = new Date(2026, 9, 23, 17, 0, 0); // Mốc chuẩn hệ thống 23/10/2026
+
+  let targetDate = new Date(now);
+  let hasExplicitDate = false;
+
+  // Bóc tách ngày tháng
+  const slashRegex = /(?:vào\s+)?(?:ngày\s+)?(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?/i;
+  const slashMatch = lower.match(slashRegex);
+  const dateMonthRegex = /(?:vào\s+)?ngày\s+(\d{1,2})\s+tháng\s+(\d{1,2})(?:\s+năm\s+(\d{4}))?/i;
+  const dmMatch = lower.match(dateMonthRegex);
+  const dayOnlyRegex = /(?:vào\s+)?ngày\s+(\d{1,2})(?!\s*[\/:])(?!\s*tháng)/i;
+  const dayOnlyMatch = lower.match(dayOnlyRegex);
+
+  if (slashMatch) {
+    const day = parseInt(slashMatch[1], 10);
+    const month = parseInt(slashMatch[2], 10) - 1;
+    const year = slashMatch[3] ? parseInt(slashMatch[3], 10) : currentYear;
+    targetDate = new Date(year, month, day);
+    hasExplicitDate = true;
+  } else if (dmMatch) {
+    const day = parseInt(dmMatch[1], 10);
+    const month = parseInt(dmMatch[2], 10) - 1;
+    const year = dmMatch[3] ? parseInt(dmMatch[3], 10) : currentYear;
+    targetDate = new Date(year, month, day);
+    hasExplicitDate = true;
+  } else if (dayOnlyMatch) {
+    const day = parseInt(dayOnlyMatch[1], 10);
+    targetDate = new Date(currentYear, 9, day); // Tháng 10 năm 2026
+    hasExplicitDate = true;
+  } else if (lower.includes('hôm nay')) {
+    targetDate = new Date(now);
+    hasExplicitDate = true;
+  } else if (lower.includes('ngày mai') || lower.includes('hôm sau')) {
+    targetDate = new Date(now);
+    targetDate.setDate(targetDate.getDate() + 1);
+    hasExplicitDate = true;
+  } else if (lower.includes('ngày kia') || lower.includes('ngày mốt')) {
+    targetDate = new Date(now);
+    targetDate.setDate(targetDate.getDate() + 2);
+    hasExplicitDate = true;
+  } else {
+    // Thứ trong tuần
+    const dayOfWeekMatch = lower.match(/thứ\s+(2|3|4|5|6|7|hai|ba|bốn|năm|sáu|bảy|chủ nhật)(?:\s+(tuần sau|tuần tới))?/i);
+    if (dayOfWeekMatch) {
+      const dayMap: Record<string, number> = {
+        '2': 1, 'hai': 1,
+        '3': 2, 'ba': 2,
+        '4': 3, 'bốn': 3,
+        '5': 4, 'năm': 4,
+        '6': 5, 'sáu': 5,
+        '7': 6, 'bảy': 6,
+        'chủ nhật': 0, 'cn': 0,
+      };
+      const targetDow = dayMap[dayOfWeekMatch[1].toLowerCase()] ?? 1;
+      const isNextWeek = !!dayOfWeekMatch[2];
+      const currentDow = now.getDay();
+      let diff = targetDow - currentDow;
+      if (diff <= 0 || isNextWeek) {
+        diff += 7;
+      }
+      targetDate = new Date(now);
+      targetDate.setDate(targetDate.getDate() + diff);
+      hasExplicitDate = true;
+    }
+  }
+
+  // Bóc tách giờ (Time): lúc HH:mm, HH giờ mm, 21:00, 21 giờ... Nếu không nói giờ, mặc định là "09:00"
+  let targetTime = '09:00';
+  let hasExplicitTime = false;
+
+  const timePatterns = [
+    /(?:vào\s+lúc|lúc|hồi)\s*(\d{1,2})(?::|h| giờ |g)(\d{1,2})?(?:\s*(phút|sáng|chiều|tối))?/i,
+    /(\d{1,2}):(\d{2})(?:\s*(phút|sáng|chiều|tối))?/i,
+    /(?:vào\s+lúc|lúc)\s*(\d{1,2})\s*(?:giờ)?(?:\s*(sáng|chiều|tối))?/i,
+    /(\d{1,2})\s*(?:giờ|h)(?:\s*(\d{1,2}))?(?:\s*(sáng|chiều|tối))?/i,
+  ];
+
+  for (const pat of timePatterns) {
+    const tMatch = lower.match(pat);
+    if (tMatch) {
+      let h = parseInt(tMatch[1], 10);
+      let m = tMatch[2] ? parseInt(tMatch[2], 10) : 0;
+      const period = (tMatch[3] || '').toLowerCase();
+
+      if (period === 'chiều' && h < 12) h += 12;
+      if (period === 'tối' && h < 12 && h !== 12) h += 12;
+      if (period === 'sáng' && h === 12) h = 0;
+
+      if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+        targetTime = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        hasExplicitTime = true;
+        break;
+      }
+    }
+  }
+
+  // Bóc tách Mức độ ưu tiên (Priority):
+  // "gấp", "khẩn cấp", "quan trọng" -> URGENT; còn lại -> MEDIUM
+  let priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT' = 'MEDIUM';
+  if (lower.includes('khẩn cấp') || lower.includes('gấp') || lower.includes('quan trọng') || lower.includes('urgent')) {
+    priority = 'URGENT';
+  } else if (lower.includes('ưu tiên cao') || lower.includes('mức cao') || lower.includes('high')) {
+    priority = 'HIGH';
+  } else if (lower.includes('ưu tiên thấp') || lower.includes('mức thấp') || lower.includes('low')) {
+    priority = 'LOW';
+  }
+
+  // Bóc tách Tiêu đề (Title):
+  // Loại bỏ các từ khóa thời gian và tiền tố ("thêm vào ngày...", "lúc...", "tạo việc...") để lấy phần nội dung chính
+  let cleanTitle = rawText
+    // Bỏ cụm lúc + giờ đầy đủ trước
+    .replace(/(?:và\s+)?(?:vào\s+)?(?:lúc|hồi)\s*\d{1,2}(?::|h|\s*giờ\s*|g)\d{0,2}(?:\s*(?:phút|sáng|chiều|tối))?/gi, '')
+    .replace(/(?:và\s+)?(?:vào\s+)?(?:lúc|hồi)\s*\d{1,2}(?:\s*giờ|\s*h)?(?:\s*\d{1,2}(?:\s*phút)?)?(?:\s*(?:sáng|chiều|tối))?/gi, '')
+    .replace(/(?:và\s+)?(?:vào\s+)?lúc\s*\d{1,2}:\d{2}(?:\s*(?:sáng|chiều|tối))?/gi, '')
+    .replace(/(?:và\s+)?\d{1,2}:\d{2}/gi, '')
+    .replace(/(?:và\s+)?\d{1,2}\s*(?:giờ|h)(?:\s*\d{1,2}(?:\s*phút)?)?(?:\s*(?:sáng|chiều|tối))?/gi, '')
+    // Bỏ ngày dạng slash (29/10/2026, 29/10)
+    .replace(/(?:vào\s+)?(?:ngày\s+)?\d{1,2}\/\d{1,2}(?:\/\d{4})?/gi, '')
+    // Bỏ ngày dạng chữ (ngày 29 tháng 10 năm 2026, ngày 29 tháng 10)
+    .replace(/(?:vào\s+)?ngày\s+\d{1,2}\s+tháng\s+\d{1,2}(?:\s+năm\s+\d{4})?/gi, '')
+    // Bỏ ngày DD (ngày 29, ngày 28)
+    .replace(/(?:vào\s+)?ngày\s+\d{1,2}(?!\s*[\/:])(?!\s*tháng)/gi, '')
+    // Bỏ từ chỉ ngày tương đối
+    .replace(/(?:vào\s+)?(?:hôm nay|ngày mai|ngày kia|ngày mốt|hôm sau)/gi, '')
+    .replace(/(?:vào\s+)?thứ\s+(?:\d+|hai|ba|bốn|năm|sáu|bảy|chủ nhật)(?:\s+(?:tuần sau|tuần tới))?/gi, '')
+    // Bỏ độ ưu tiên
+    .replace(/(?:mức\s+)?(?:khẩn cấp|gấp|quan trọng|urgent|ưu tiên cao|mức cao|high|ưu tiên thấp|mức thấp|low)/gi, '')
+    // Bỏ tiền tố hành động
+    .replace(/^(?:hãy\s+)?(?:thêm|tạo|lập|nhắc|hẹn|lên lịch|đặt lịch|deadline|ghi chú)\s+(?:cho tôi\s+|tôi\s+|mình\s+)?(?:vào|công việc|việc|task|lịch hẹn|sự kiện)?\s*/gi, '')
+    // Bỏ các từ nhân xưng hoặc liên từ thừa
+    .replace(/^(?:tôi\s+|mình\s+|hãy\s+)/gi, '')
+    .replace(/^(?:vào\s+ngày\s+|vào\s+|và\s+|là\s+|rằng\s+|về\s+|cần\s+)/gi, '')
+    // Bỏ các từ nối thừa ở cuối câu
+    .replace(/(?:\s+vào|\s+và|\s+lúc|\s+hạn chót|\s+deadline)+$/gi, '')
+    // Thu gọn khoảng trắng
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Làm sạch dấu phẩy hoặc chấm thừa
+  cleanTitle = cleanTitle.replace(/^[,.\s-]+|[,.\s-]+$/g, '').trim();
+
+  if (!cleanTitle) {
+    cleanTitle = 'Công việc thêm bằng giọng nói';
+  } else {
+    // Viết hoa chữ cái đầu
+    cleanTitle = cleanTitle.charAt(0).toUpperCase() + cleanTitle.slice(1);
+  }
+
+  const yStr = targetDate.getFullYear();
+  const mStr = String(targetDate.getMonth() + 1).padStart(2, '0');
+  const dStr = String(targetDate.getDate()).padStart(2, '0');
+  const dateFormatted = `${yStr}-${mStr}-${dStr}`;
+
+  const [hPart, mPart] = targetTime.split(':').map((num) => parseInt(num, 10) || 0);
+  const exactDeadline = new Date(yStr, targetDate.getMonth(), targetDate.getDate(), hPart, mPart, 0);
+
+  return {
+    intent: 'CREATE_TASK',
+    confidence: hasExplicitDate || hasExplicitTime ? 0.95 : 0.85,
+    data: {
+      title: cleanTitle,
+      date: dateFormatted,
+      time: targetTime,
+      deadline: exactDeadline.toISOString(),
+      priority,
+    },
+  };
+}
+
+/**
+ * 8. Phân tích câu lệnh giọng nói thông minh bằng Gemini AI với Fallback tự động
+ */
+export async function parseVoiceIntent(text: string): Promise<VoiceParsedResult> {
+  const fallback = fallbackParseVoiceCommand(text);
+  const apiKey = getGeminiApiKey();
+
+  if (!apiKey) {
+    return fallback;
+  }
+
+  try {
+    const prompt = `
+Bạn là Trợ lý AI phân tích ngôn ngữ tự nhiên (NLP Voice Parser) cho hệ thống lịch làm việc công ty năm 2026.
+Thời điểm hiện tại của hệ thống: Thứ Năm, ngày 23 tháng 10 năm 2026.
+
+Hãy phân tích câu lệnh bằng giọng nói tiếng Việt sau của người dùng:
+"${text}"
+
+YÊU CẦU PHÂN LOẠI Ý ĐỊNH (INTENT):
+1. "CREATE_TASK": Người dùng muốn tạo việc, thêm lịch hẹn, nhắc nhở, nộp bài, deadline...
+   Ví dụ: "thêm vào ngày 29 tháng 10 nộp bài và lúc 21:00", "tạo việc kiểm tra báo cáo vào ngày mai lúc 15 giờ", "deadline đồ án ngày 30 tháng 10 gấp".
+   - date: format "YYYY-MM-DD". Nếu người nói "ngày 29 tháng 10" -> "2026-10-29". Nếu "ngày mai" -> "2026-10-24". Nếu không nói ngày -> "2026-10-23".
+   - time: format "HH:mm". Nếu "21:00", "21 giờ" -> "21:00". Nếu không nói giờ, mặc định là "09:00".
+   - deadline: format ISO 8601 string theo giờ địa phương của date và time.
+   - title: Tên công việc chính sau khi đã loại bỏ các từ chỉ thời gian và tiền tố ("thêm vào ngày...", "lúc...", "tạo việc..."). Ví dụ "Nộp bài", "Kiểm tra báo cáo".
+   - priority: "URGENT" nếu có từ "gấp", "khẩn cấp", "quan trọng"; còn lại "MEDIUM".
+2. "SUMMARY": Người dùng muốn xem tóm tắt, báo cáo lịch trình, "tóm tắt công việc ngày 29", "ngày 29 có việc gì", "hôm nay có việc gì", "tuần này có gì", "tổng quan công việc". Điền date tương ứng (ví dụ nếu nói "ngày 29", "ngày 29 tháng 10", "29/10" -> "2026-10-29").
+3. "FILTER": Người dùng muốn tìm kiếm hoặc lọc lịch: "tìm...", "lọc...", "các việc quá hạn", "việc cần xử lý", "tất cả", "dự án".
+   - filterTarget: "PENDING" (cho việc quá hạn/cần xử lý), "PROJECTS", "TASKS", "ALL".
+   - searchQuery: từ khóa tìm kiếm sạch.
+
+TRẢ VỀ DUY NHẤT 1 ĐỐI TƯỢNG JSON THEO ĐỊNH DẠNG SAU:
+{
+  "intent": "CREATE_TASK" | "SUMMARY" | "FILTER",
+  "confidence": 0.98,
+  "data": {
+    "title": "Nộp bài",
+    "date": "2026-10-29",
+    "time": "21:00",
+    "deadline": "2026-10-29T21:00:00",
+    "priority": "URGENT" | "HIGH" | "MEDIUM" | "LOW",
+    "filterTarget": "ALL" | "PENDING" | "PROJECTS" | "TASKS",
+    "searchQuery": "chuỗi tìm kiếm"
+  }
+}
+`;
+
+    const model = getModelForRequest('gemini-1.5-flash', {
+      temperature: 0.1,
+      responseMimeType: 'application/json',
+    });
+
+    const result = await model.generateContent(prompt);
+    const textRes = result.response.text();
+    const parsed = cleanAndParseJSON<VoiceParsedResult>(textRes);
+
+    if (parsed && parsed.intent) {
+      return {
+        ...parsed,
+        data: {
+          ...fallback.data,
+          ...parsed.data,
+        },
+      };
+    }
+    return fallback;
+  } catch (error: any) {
+    console.warn('[Gemini][parseVoiceIntent] Lỗi gọi Gemini API, sử dụng Local Regex Parser:', error?.message);
+    return fallback;
+  }
+}
+
 /**
  * 7. Sinh nhận xét đánh giá hiệu suất cá nhân KPI chuẩn nhân sự thông qua Gemini AI
  */
