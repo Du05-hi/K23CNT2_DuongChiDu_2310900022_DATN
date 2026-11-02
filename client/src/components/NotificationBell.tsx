@@ -49,6 +49,8 @@ const getNotificationIcon = (type: NotificationType) => {
   switch (type) {
     case 'TASK_ASSIGNED':
       return <Clock className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />;
+    case 'TASK_UPDATED':
+      return <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400" />;
     case 'TASK_STATUS_CHANGED':
     case 'TASK_COMPLETED':
       return <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />;
@@ -132,8 +134,15 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
     const fetchNotifs = async () => {
       try {
         const res = await notificationService.getNotifications(20, 1);
-        if (isMounted && Array.isArray(res.notifications)) {
-          setNotifications(res.notifications);
+        if (isMounted) {
+          const list = Array.isArray(res)
+            ? res
+            : Array.isArray(res?.notifications)
+            ? res.notifications
+            : Array.isArray((res as any)?.data?.notifications)
+            ? (res as any).data.notifications
+            : [];
+          setNotifications(list);
         }
       } catch (error) {
         console.error('Không thể tải thông báo:', error);

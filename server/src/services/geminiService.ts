@@ -51,6 +51,15 @@ export interface SubTaskSuggestion {
   description: string;
 }
 
+export interface EnterpriseSubtaskSuggestion {
+  title: string;
+  description: string;
+  estimatedHours: number;
+  category: 'CORE_PROJECT' | 'RD' | 'OPERATIONS';
+  priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+  dodChecklist: string[];
+}
+
 export interface TaskSummaryInput {
   id: string;
   title: string;
@@ -191,6 +200,127 @@ function getFallbackSubtasks(taskTitle: string, taskDescription: string): SubTas
       estimatedHours: 2,
       priority: 'MEDIUM',
       description: 'Chạy kiểm thử chức năng, tối ưu hóa hiệu năng và chuyển sang trạng thái Done.',
+    },
+  ];
+}
+
+/**
+ * Phân tách công việc WBS Đa tầng chuyên sâu tích hợp Tiêu chí nghiệm thu (DoD) bằng Gemini AI
+ */
+export async function enterpriseTaskBreakdown(
+  taskTitle: string,
+  taskDescription: string = '',
+  projectScope: string = ''
+): Promise<EnterpriseSubtaskSuggestion[]> {
+  try {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      console.warn('[Gemini] Không có GEMINI_API_KEY, sử dụng fallback enterprise subtasks.');
+      return getFallbackEnterpriseSubtasks(taskTitle, taskDescription);
+    }
+
+    const prompt = `
+Bạn là Kỹ sư Trưởng kiêm Chuyên gia Quản lý Dự án Phần mềm Doanh nghiệp (Enterprise PM & Tech Lead).
+Hãy phân tích công việc sau và phân rã thành từ 3 đến tối đa 5 công việc con (WBS Subtasks) chi tiết theo chuẩn phần mềm chuyên nghiệp, kèm theo 2-3 tiêu chí nghiệm thu (Definition of Done - DoD) rõ ràng cho mỗi subtask hoặc công việc.
+
+Tên công việc chính: "${normalizeString(taskTitle, 'Công việc chưa đặt tên')}"
+Mô tả chi tiết: "${normalizeString(taskDescription, 'Không có mô tả chi tiết')}"
+Phạm vi dự án: "${normalizeString(projectScope, 'Phát triển phần mềm doanh nghiệp')}"
+
+Yêu cầu trả về kết quả định dạng JSON ARRAY thuần túy (không kèm markdown ngoài JSON):
+[
+  {
+    "title": "Tên công việc con ngắn gọn, mở đầu bằng động từ hành động bằng tiếng Việt",
+    "description": "Mô tả chi tiết kỹ thuật cần thực hiện và kết quả đầu ra",
+    "estimatedHours": số giờ ước tính từ 1 đến 16,
+    "category": "CORE_PROJECT" | "RD" | "OPERATIONS",
+    "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
+    "dodChecklist": [
+      "Tiêu chí nghiệm thu 1 cụ thể, đo lường được",
+      "Tiêu chí nghiệm thu 2 cụ thể, đo lường được"
+    ]
+  }
+]
+`;
+
+    const generationConfig: GenerationConfig = {
+      temperature: 0.25,
+      topP: 0.85,
+      topK: 40,
+      responseMimeType: 'application/json',
+    };
+
+    const model = getModelForRequest('gemini-1.5-flash', generationConfig);
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
+    const subTasks = cleanAndParseJSON<EnterpriseSubtaskSuggestion[]>(responseText);
+
+    if (!Array.isArray(subTasks) || subTasks.length === 0) {
+      return getFallbackEnterpriseSubtasks(taskTitle, taskDescription);
+    }
+
+    return subTasks.slice(0, 6).map((item) => ({
+      title: normalizeString(item.title, 'Công việc con'),
+      description: normalizeString(item.description, 'Thực thi theo kế hoạch'),
+      estimatedHours: typeof item.estimatedHours === 'number' && item.estimatedHours > 0 ? item.estimatedHours : 4,
+      category: ['CORE_PROJECT', 'RD', 'OPERATIONS'].includes(item.category) ? item.category : 'CORE_PROJECT',
+      priority: ['LOW', 'MEDIUM', 'HIGH', 'URGENT'].includes(item.priority) ? item.priority : 'MEDIUM',
+      dodChecklist: Array.isArray(item.dodChecklist) && item.dodChecklist.length > 0
+        ? item.dodChecklist.map((c) => String(c).trim()).filter(Boolean)
+        : ['Hoàn thành chức năng', 'Kiểm thử không lỗi'],
+    }));
+  } catch (error: any) {
+    console.warn('[Gemini][enterpriseTaskBreakdown] Lỗi, sử dụng fallback enterprise template:', error?.message);
+    return getFallbackEnterpriseSubtasks(taskTitle, taskDescription);
+  }
+}
+
+function getFallbackEnterpriseSubtasks(taskTitle: string, taskDescription: string): EnterpriseSubtaskSuggestion[] {
+  const safeTitle = normalizeString(taskTitle, 'Công việc');
+  return [
+    {
+      title: `1. Khảo sát yêu cầu & Đặc tả luồng xử lý: ${safeTitle}`,
+      description: `Rà soát tài liệu yêu cầu, xác định các trường dữ liệu và ràng buộc kỹ thuật cho ${safeTitle}.`,
+      estimatedHours: 3,
+      category: 'CORE_PROJECT',
+      priority: 'HIGH',
+      dodChecklist: [
+        'Tài liệu đặc tả yêu cầu và sơ đồ luồng dữ liệu được phê duyệt',
+        'Xác nhận không xung đột logic với các module hiện hữu',
+      ],
+    },
+    {
+      title: `2. Thiết kế CSDL & Xây dựng API Backend cho ${safeTitle}`,
+      description: 'Cập nhật Prisma schema, viết API controller, validate dữ liệu đầu vào và kiểm tra quyền RBAC.',
+      estimatedHours: 6,
+      category: 'CORE_PROJECT',
+      priority: 'HIGH',
+      dodChecklist: [
+        'API hoàn thành và trả về HTTP status chuẩn (200, 400, 403)',
+        'Đã kiểm tra xử lý ngoại lệ và logging kiểm toán đầy đủ',
+      ],
+    },
+    {
+      title: `3. Phát triển Giao diện người dùng (UI Component & State)`,
+      description: 'Xây dựng giao diện React Tailwind, liên kết React Query, xử lý loading, error và toast phản hồi.',
+      estimatedHours: 5,
+      category: 'CORE_PROJECT',
+      priority: 'MEDIUM',
+      dodChecklist: [
+        'Giao diện phản hồi chuẩn Responsive, chuẩn Accessibility',
+        'Tương thích hoàn toàn với trạng thái Dark/Light mode',
+      ],
+    },
+    {
+      title: `4. Kiểm thử chất lượng (QA/DoD) & Bàn giao nghiệm thu`,
+      description: 'Chạy kiểm thử biên dịch TypeScript (tsc --noEmit), kiểm tra luồng kéo thả và nghiệm thu hoàn thành.',
+      estimatedHours: 2,
+      category: 'OPERATIONS',
+      priority: 'MEDIUM',
+      dodChecklist: [
+        '0 lỗi TypeScript biên dịch trên cả client và server',
+        'Được QA/Reviewer chấp thuận nghiệm thu chuyển sang DONE',
+      ],
     },
   ];
 }

@@ -7,6 +7,19 @@ import {
   updateTask,
   updateTaskDeadline,
   updateTaskStatus,
+  approveTaskReview,
+  rejectTaskReview,
+  getTaskChecklists,
+  createTaskChecklist,
+  toggleTaskChecklist,
+  deleteTaskChecklist,
+  getTaskDependencies,
+  createTaskDependency,
+  deleteTaskDependency,
+  getProjectMilestones,
+  createProjectMilestone,
+  updateProjectMilestone,
+  deleteProjectMilestone,
   deleteTask,
   addComment,
   getComments,
@@ -17,8 +30,11 @@ import {
   deleteTaskAttachment,
   authorizeTaskAttachmentAccess,
   getTaskAttachmentContent,
+  logWorkTask,
+  getTaskWorkLogs,
+  getTaskActivities,
 } from '../controllers/taskController';
-import { searchTasksNL } from '../controllers/aiController';
+import { searchTasksNL, enterpriseTaskBreakdown } from '../controllers/aiController';
 import { authenticateToken } from '../middlewares/authMiddleware';
 import { uploadTaskFiles } from '../config/upload';
 
@@ -41,7 +57,31 @@ router.put('/:id/deadline', updateTaskDeadline);
 router.put('/:id/status', updateTaskStatus);
 router.delete('/:id', deleteTask);
 
-// 3. Tài liệu đính kèm
+// 3. Quy trình Review & QA nghiệm thu công việc
+router.post('/:id/review-approve', approveTaskReview);
+router.post('/:id/review-reject', rejectTaskReview);
+
+// 4. Gemini AI Copilot phân rã WBS & DoD
+router.post('/:id/ai-breakdown', enterpriseTaskBreakdown);
+
+// 5. Tiêu chí nghiệm thu (Definition of Done - DoD)
+router.get('/:id/checklists', getTaskChecklists);
+router.post('/:id/checklists', createTaskChecklist);
+router.put('/checklists/:checklistId/toggle', toggleTaskChecklist);
+router.delete('/checklists/:checklistId', deleteTaskChecklist);
+
+// 6. Quan hệ phụ thuộc công việc (Task Dependencies)
+router.get('/:id/dependencies', getTaskDependencies);
+router.post('/:id/dependencies', createTaskDependency);
+router.delete('/dependencies/:dependencyId', deleteTaskDependency);
+
+// 7. Mốc bàn giao dự án (Milestones)
+router.get('/milestones/project/:projectId', getProjectMilestones);
+router.post('/milestones/project/:projectId', createProjectMilestone);
+router.put('/milestones/:id', updateProjectMilestone);
+router.delete('/milestones/:id', deleteProjectMilestone);
+
+// 8. Tài liệu đính kèm
 router.post(
   '/:id/attachments',
   authorizeTaskAttachmentAccess,
@@ -51,13 +91,18 @@ router.post(
 router.get('/:id/attachments/:attachmentId/content', getTaskAttachmentContent);
 router.delete('/:id/attachments/:attachmentId', deleteTaskAttachment);
 
-// 4. Bình luận (Comments)
+// 9. Bình luận (Comments)
 router.post('/:id/comments', addComment);
 router.get('/:id/comments', getComments);
 
-// 5. Công việc con (Sub-tasks)
+// 10. Công việc con (Sub-tasks)
 router.post('/:id/subtasks', createSubTask);
 router.put('/subtasks/:subTaskId', updateSubTask);
 router.delete('/subtasks/:subTaskId', deleteSubTask);
+
+// 11. Ghi nhận giờ làm (WorkLog) & Audit Trail (Lịch sử hoạt động)
+router.post('/:id/worklogs', logWorkTask);
+router.get('/:id/worklogs', getTaskWorkLogs);
+router.get('/:id/activities', getTaskActivities);
 
 export default router;

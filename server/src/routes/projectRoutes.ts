@@ -9,6 +9,7 @@ import {
   removeMember,
   getProjectStats,
 } from '../controllers/projectController';
+import { getProjectMilestones, createProjectMilestone } from '../controllers/taskController';
 import { authenticateToken, authorizeRoles } from '../middlewares/authMiddleware';
 
 const router = express.Router();
@@ -28,7 +29,11 @@ router.get('/:id', getProjectById);
 router.put('/:id', authorizeRoles('ADMIN', 'MANAGER'), updateProject);
 router.delete('/:id', authorizeRoles('ADMIN', 'MANAGER'), deleteProject);
 
-// 4. Quản lý thành viên tham gia dự án
+// 4. Mốc bàn giao dự án (Milestones)
+router.get('/:id/milestones', getProjectMilestones);
+router.post('/:id/milestones', authorizeRoles('ADMIN', 'MANAGER'), createProjectMilestone);
+
+// 5. Quản lý thành viên tham gia dự án
 router.post('/:id/members', authorizeRoles('ADMIN', 'MANAGER'), addMember);
 router.delete('/:id/members/:userId', authorizeRoles('ADMIN', 'MANAGER'), removeMember);
 

@@ -112,11 +112,17 @@ export const createTask = async (req: AuthenticatedRequest, res: Response): Prom
       title,
       description,
       status = 'TODO',
+      category = 'CORE_PROJECT',
       priority = 'MEDIUM',
       dueDate,
       projectId,
       assigneeId,
       estimatedHours,
+      actualHours,
+      kpiBonusScore,
+      kpiPenaltyScore,
+      parentId,
+      isParent,
     } = req.body;
 
     if (!title || !projectId) {
@@ -126,6 +132,17 @@ export const createTask = async (req: AuthenticatedRequest, res: Response): Prom
     if (!req.user || !(await canManageProject(req.user, projectId))) {
       res.status(403).json({ success: false, message: 'Chỉ quản trị viên hoặc quản lý dự án mới được tạo công việc.' });
       return;
+    }
+
+    // Nếu có parentId, đánh dấu parent task là isParent = true
+    if (parentId) {
+      const parent = await prisma.task.findUnique({ where: { id: parentId } });
+      if (parent && !parent.isParent) {
+        await prisma.task.update({
+          where: { id: parentId },
+          data: { isParent: true },
+        });
+      }
     }
 
     // Tính position lớn nhất trong cột status của project đó
@@ -141,13 +158,20 @@ export const createTask = async (req: AuthenticatedRequest, res: Response): Prom
         title: title.trim(),
         description: description || null,
         status,
+        category: category || 'CORE_PROJECT',
         priority,
         dueDate: dueDate ? new Date(dueDate) : null,
+        completedAt: status === 'DONE' ? new Date() : null,
         estimatedHours: estimatedHours ? parseFloat(estimatedHours) : null,
+        actualHours: actualHours ? parseFloat(actualHours) : null,
+        kpiBonusScore: kpiBonusScore !== undefined ? parseFloat(kpiBonusScore) : 0,
+        kpiPenaltyScore: kpiPenaltyScore !== undefined ? parseFloat(kpiPenaltyScore) : 0,
         projectId,
         assigneeId: assigneeId || null,
         createdById: userId,
         position,
+        parentId: parentId || null,
+        isParent: isParent === true,
       },
       include: {
         assignee: {
@@ -158,6 +182,14 @@ export const createTask = async (req: AuthenticatedRequest, res: Response): Prom
         },
         project: {
           select: { id: true, name: true },
+        },
+        parentTask: {
+          select: { id: true, title: true, status: true, priority: true },
+        },
+        subtasks: {
+          include: {
+            assignee: { select: { id: true, name: true, avatar: true } },
+          },
         },
       },
     });
@@ -227,11 +259,39 @@ export const getTasksByProject = async (req: AuthenticatedRequest, res: Response
         assignee: {
           select: { id: true, name: true, email: true, avatar: true },
         },
+        reviewer: {
+          select: { id: true, name: true, email: true, avatar: true },
+        },
+        milestone: {
+          select: { id: true, title: true, status: true },
+        },
+        parentTask: {
+          select: { id: true, title: true, status: true, priority: true },
+        },
+        subtasks: {
+          include: {
+            assignee: { select: { id: true, name: true, avatar: true } },
+          },
+          orderBy: { position: 'asc' },
+        },
         subTasks: {
           select: { id: true, title: true, isCompleted: true },
         },
+        checklists: {
+          select: { id: true, content: true, isRequired: true, isCompleted: true },
+        },
+        dependencies: {
+          include: {
+            dependsOnTask: { select: { id: true, title: true, status: true, priority: true } },
+          },
+        },
+        dependedBy: {
+          include: {
+            task: { select: { id: true, title: true, status: true, priority: true } },
+          },
+        },
         _count: {
-          select: { comments: true, subTasks: true, attachments: true },
+          select: { comments: true, subTasks: true, subtasks: true, attachments: true, checklists: true },
         },
       },
       orderBy: {
@@ -405,14 +465,47 @@ export const getTaskById = async (req: AuthenticatedRequest, res: Response): Pro
         assignee: {
           select: { id: true, name: true, email: true, avatar: true },
         },
+        reviewer: {
+          select: { id: true, name: true, email: true, avatar: true },
+        },
+        milestone: true,
         creator: {
           select: { id: true, name: true, email: true },
         },
         project: {
           select: { id: true, name: true, status: true },
         },
+        parentTask: {
+          select: { id: true, title: true, status: true, priority: true },
+        },
+        subtasks: {
+          include: {
+            assignee: { select: { id: true, name: true, avatar: true } },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
         subTasks: {
           orderBy: { createdAt: 'asc' },
+        },
+        checklists: {
+          include: {
+            completedBy: { select: { id: true, name: true, avatar: true } },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+        dependencies: {
+          include: {
+            dependsOnTask: {
+              select: { id: true, title: true, status: true, priority: true, dueDate: true, assignee: { select: { name: true } } },
+            },
+          },
+        },
+        dependedBy: {
+          include: {
+            task: {
+              select: { id: true, title: true, status: true, priority: true, dueDate: true, assignee: { select: { name: true } } },
+            },
+          },
         },
         comments: {
           include: {
@@ -424,6 +517,12 @@ export const getTaskById = async (req: AuthenticatedRequest, res: Response): Pro
         },
         attachments: {
           orderBy: { createdAt: 'desc' },
+        },
+        workLogs: {
+          include: {
+            user: { select: { id: true, name: true, avatar: true, email: true } },
+          },
+          orderBy: { loggedDate: 'desc' },
         },
       },
     });
@@ -720,6 +819,55 @@ export const getTaskAttachmentContent = async (
 };
 
 /**
+ * Kiểm tra xem task có bị chặn bởi task tiền đề nào chưa xong không (Dependency Blocking Rule).
+ */
+export async function checkUnfinishedBlockingDependencies(taskId: string): Promise<{ id: string; title: string } | null> {
+  const blockingDeps = await prisma.taskDependency.findMany({
+    where: {
+      OR: [
+        { taskId, type: 'BLOCKED_BY' },
+        { dependsOnTaskId: taskId, type: 'BLOCKS' },
+      ],
+    },
+    include: {
+      task: { select: { id: true, title: true, status: true } },
+      dependsOnTask: { select: { id: true, title: true, status: true } },
+    },
+  });
+
+  for (const dep of blockingDeps) {
+    if (dep.taskId === taskId && dep.type === 'BLOCKED_BY') {
+      if (dep.dependsOnTask && dep.dependsOnTask.status !== 'DONE') {
+        return { id: dep.dependsOnTask.id, title: dep.dependsOnTask.title };
+      }
+    }
+    if (dep.dependsOnTaskId === taskId && dep.type === 'BLOCKS') {
+      if (dep.task && dep.task.status !== 'DONE') {
+        return { id: dep.task.id, title: dep.task.title };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Kiểm tra xem task có tiêu chí nghiệm thu bắt buộc (DoD) nào chưa hoàn thành khi chuyển sang DONE không.
+ */
+export async function checkUnfinishedRequiredDoD(taskId: string): Promise<string[]> {
+  const pendingChecklists = await prisma.taskChecklist.findMany({
+    where: {
+      taskId,
+      isRequired: true,
+      isCompleted: false,
+    },
+    select: { content: true },
+  });
+
+  return pendingChecklists.map((c) => c.content);
+}
+
+/**
  * 4. Cập nhật task đầy đủ, detect status change, tính KPI tạm nếu DONE, emit 'task:updated'
  */
 export const updateTask = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
@@ -730,12 +878,20 @@ export const updateTask = async (req: AuthenticatedRequest, res: Response): Prom
       title,
       description,
       status,
+      category,
       priority,
       dueDate,
       assigneeId,
+      reviewerId,
+      milestoneId,
+      rejectReason,
       estimatedHours,
       actualHours,
+      kpiBonusScore,
+      kpiPenaltyScore,
       position,
+      parentId,
+      isParent,
     } = req.body;
 
     const currentTask = await prisma.task.findUnique({
@@ -751,7 +907,41 @@ export const updateTask = async (req: AuthenticatedRequest, res: Response): Prom
       return;
     }
 
+    // Nếu gán parentId, cập nhật parent task isParent = true
+    if (parentId && parentId !== currentTask.parentId) {
+      await prisma.task.update({
+        where: { id: parentId },
+        data: { isParent: true },
+      });
+    }
+
+    // 1. Dependency Blocking Rule
+    if ((status === 'IN_PROGRESS' || status === 'DONE') && status !== currentTask.status) {
+      const blocking = await checkUnfinishedBlockingDependencies(id);
+      if (blocking) {
+        res.status(400).json({
+          success: false,
+          message: `Không thể chuyển trạng thái. Công việc đang bị khóa bởi task tiền đề: ${blocking.title} (#${blocking.id.slice(0, 8)})`,
+        });
+        return;
+      }
+    }
+
+    // 2. DoD Verification
+    if (status === 'DONE' && currentTask.status !== 'DONE') {
+      const pendingDoD = await checkUnfinishedRequiredDoD(id);
+      if (pendingDoD.length > 0) {
+        res.status(400).json({
+          success: false,
+          message: `Không thể hoàn thành công việc. Còn ${pendingDoD.length} tiêu chí nghiệm thu bắt buộc (DoD) chưa được xác nhận: "${pendingDoD[0]}"`,
+          data: { pendingDoD },
+        });
+        return;
+      }
+    }
+
     const isStatusChangedToDone = status === 'DONE' && currentTask.status !== 'DONE';
+    const isStatusChangedFromDone = status !== undefined && status !== 'DONE' && currentTask.status === 'DONE';
 
     const updatedTask = await prisma.task.update({
       where: { id },
@@ -759,21 +949,59 @@ export const updateTask = async (req: AuthenticatedRequest, res: Response): Prom
         title: title !== undefined ? title.trim() : undefined,
         description: description !== undefined ? description : undefined,
         status: status !== undefined ? status : undefined,
+        category: category !== undefined ? category : undefined,
         priority: priority !== undefined ? priority : undefined,
         dueDate: dueDate !== undefined ? (dueDate ? new Date(dueDate) : null) : undefined,
-        assigneeId: assigneeId !== undefined ? assigneeId : undefined,
+        completedAt: isStatusChangedToDone ? new Date() : isStatusChangedFromDone ? null : undefined,
+        assigneeId: assigneeId !== undefined ? (assigneeId || null) : undefined,
+        reviewerId: reviewerId !== undefined ? (reviewerId || null) : undefined,
+        milestoneId: milestoneId !== undefined ? (milestoneId || null) : undefined,
+        rejectReason: rejectReason !== undefined ? (rejectReason || null) : undefined,
         estimatedHours: estimatedHours !== undefined ? (estimatedHours ? parseFloat(estimatedHours) : null) : undefined,
         actualHours: actualHours !== undefined ? (actualHours ? parseFloat(actualHours) : null) : undefined,
+        kpiBonusScore: kpiBonusScore !== undefined ? (kpiBonusScore ? parseFloat(kpiBonusScore) : 0) : undefined,
+        kpiPenaltyScore: kpiPenaltyScore !== undefined ? (kpiPenaltyScore ? parseFloat(kpiPenaltyScore) : 0) : undefined,
         position: position !== undefined ? parseInt(position, 10) : undefined,
+        parentId: parentId !== undefined ? (parentId || null) : undefined,
+        isParent: isParent !== undefined ? Boolean(isParent) : undefined,
       },
       include: {
         assignee: {
           select: { id: true, name: true, email: true, avatar: true },
         },
+        reviewer: {
+          select: { id: true, name: true, email: true, avatar: true },
+        },
+        milestone: true,
         project: {
           select: { id: true, name: true },
         },
+        parentTask: {
+          select: { id: true, title: true, status: true, priority: true },
+        },
+        subtasks: {
+          include: {
+            assignee: { select: { id: true, name: true, avatar: true } },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
         subTasks: true,
+        checklists: {
+          include: { completedBy: { select: { id: true, name: true } } },
+          orderBy: { createdAt: 'asc' },
+        },
+        dependencies: {
+          include: { dependsOnTask: { select: { id: true, title: true, status: true } } },
+        },
+        dependedBy: {
+          include: { task: { select: { id: true, title: true, status: true } } },
+        },
+        workLogs: {
+          include: {
+            user: { select: { id: true, name: true, avatar: true, email: true } },
+          },
+          orderBy: { loggedDate: 'desc' },
+        },
       },
     });
 
@@ -853,7 +1081,7 @@ export const updateTask = async (req: AuthenticatedRequest, res: Response): Prom
 export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { status, position } = req.body;
+    const { status, position, rejectReason } = req.body;
     const userId = req.user?.id;
 
     if (!status) {
@@ -863,7 +1091,10 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
 
     const currentTask = await prisma.task.findUnique({
       where: { id },
-      include: { project: true },
+      include: {
+        project: true,
+        assignee: { select: { id: true, name: true } },
+      },
     });
 
     if (!currentTask) {
@@ -873,12 +1104,40 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
     if (!req.user || (
       !(await canManageProject(req.user, currentTask.projectId))
       && currentTask.assigneeId !== req.user.id
+      && currentTask.reviewerId !== req.user.id
     )) {
       res.status(403).json({ success: false, message: 'Bạn không có quyền cập nhật trạng thái công việc này.' });
       return;
     }
 
+    // 1. Dependency Blocking Rule: Chặn nếu còn task tiền đề chưa xong
+    if ((status === 'IN_PROGRESS' || status === 'DONE') && currentTask.status !== status) {
+      const blocking = await checkUnfinishedBlockingDependencies(id);
+      if (blocking) {
+        res.status(400).json({
+          success: false,
+          message: `Không thể chuyển trạng thái. Công việc đang bị khóa bởi task tiền đề: ${blocking.title} (#${blocking.id.slice(0, 8)})`,
+        });
+        return;
+      }
+    }
+
+    // 2. DoD Verification: Chặn nếu tiêu chí nghiệm thu bắt buộc chưa hoàn thành
+    if (status === 'DONE' && currentTask.status !== 'DONE') {
+      const pendingDoD = await checkUnfinishedRequiredDoD(id);
+      if (pendingDoD.length > 0) {
+        res.status(400).json({
+          success: false,
+          message: `Không thể hoàn thành công việc. Còn ${pendingDoD.length} tiêu chí nghiệm thu bắt buộc (DoD) chưa được xác nhận: "${pendingDoD[0]}"`,
+          data: { pendingDoD },
+        });
+        return;
+      }
+    }
+
     const isTransitionToDone = status === 'DONE' && currentTask.status !== 'DONE';
+    const isTransitionFromDone = status !== 'DONE' && currentTask.status === 'DONE';
+    const isRejecting = status === 'IN_PROGRESS' && currentTask.status === 'REVIEW' && Boolean(rejectReason);
 
     if (currentTask.assigneeId) {
       void ensureProjectMember(currentTask.projectId, currentTask.assigneeId);
@@ -889,10 +1148,25 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
       data: {
         status,
         position: position !== undefined ? parseInt(position, 10) : currentTask.position,
+        completedAt: isTransitionToDone ? new Date() : isTransitionFromDone ? null : undefined,
+        rejectReason: isRejecting ? rejectReason : (status === 'DONE' ? null : undefined),
       },
       include: {
         assignee: {
           select: { id: true, name: true, avatar: true },
+        },
+        reviewer: {
+          select: { id: true, name: true, avatar: true },
+        },
+        milestone: true,
+        checklists: {
+          include: { completedBy: { select: { id: true, name: true } } },
+        },
+        dependencies: {
+          include: { dependsOnTask: { select: { id: true, title: true, status: true } } },
+        },
+        dependedBy: {
+          include: { task: { select: { id: true, title: true, status: true } } },
         },
       },
     });
@@ -907,6 +1181,7 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
         newStatus: status,
         position: updatedTask.position,
         task: updatedTask,
+        rejectReason: updatedTask.rejectReason,
       });
 
       // Nếu DONE thì emit sự kiện task:completed tới đúng user để trigger Confetti
@@ -922,15 +1197,28 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
     if (userId) {
       await logActivity({
         userId,
-        action: 'TASK_STATUS_CHANGED',
+        action: isRejecting ? 'TASK_REJECTED' : 'TASK_STATUS_CHANGED',
         entityType: 'TASK',
         entityId: id,
-        description: `Chuyển công việc "${currentTask.title}" từ ${currentTask.status} sang ${status}`,
+        description: isRejecting
+          ? `Từ chối nghiệm thu công việc "${currentTask.title}" (Lý do: ${rejectReason})`
+          : `Chuyển công việc "${currentTask.title}" từ ${currentTask.status} sang ${status}`,
         metadata: {
           projectId: currentTask.projectId,
           from: currentTask.status,
           to: status,
+          rejectReason: isRejecting ? rejectReason : undefined,
         },
+      });
+    }
+
+    if (isRejecting && currentTask.assigneeId) {
+      await createNotification({
+        userId: currentTask.assigneeId,
+        type: 'TASK_STATUS_CHANGED',
+        title: '⚠️ Công việc bị từ chối kiểm thử',
+        message: `Công việc "${currentTask.title}" bị Reviewer trả về yêu cầu chỉnh sửa: ${rejectReason}`,
+        relatedId: `${currentTask.projectId}:${currentTask.id}`,
       });
     }
 
@@ -940,7 +1228,7 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
 
     res.status(200).json({
       success: true,
-      message: 'Cập nhật trạng thái công việc thành công!',
+      message: isRejecting ? 'Đã từ chối công việc và trả về In Progress.' : 'Cập nhật trạng thái công việc thành công!',
       data: updatedTask,
     });
   } catch (error: any) {
@@ -950,6 +1238,503 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
       message: 'Lỗi máy chủ khi cập nhật trạng thái công việc.',
       error: error.message,
     });
+  }
+};
+
+/**
+ * QA / Reviewer chấp thuận nghiệm thu công việc chuyển sang DONE
+ */
+export const approveTaskReview = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.id;
+
+    const currentTask = await prisma.task.findUnique({
+      where: { id },
+      include: { project: true },
+    });
+
+    if (!currentTask) {
+      res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
+      return;
+    }
+    if (!req.user || (
+      !(await canManageProject(req.user, currentTask.projectId))
+      && currentTask.reviewerId !== req.user.id
+    )) {
+      res.status(403).json({ success: false, message: 'Chỉ Reviewer được chỉ định hoặc Quản lý dự án mới có quyền nghiệm thu công việc này.' });
+      return;
+    }
+
+    // Kiểm tra Dependency Blocking
+    const blocking = await checkUnfinishedBlockingDependencies(id);
+    if (blocking) {
+      res.status(400).json({
+        success: false,
+        message: `Không thể nghiệm thu. Công việc đang bị khóa bởi task tiền đề: ${blocking.title} (#${blocking.id.slice(0, 8)})`,
+      });
+      return;
+    }
+
+    // Kiểm tra DoD
+    const pendingDoD = await checkUnfinishedRequiredDoD(id);
+    if (pendingDoD.length > 0) {
+      res.status(400).json({
+        success: false,
+        message: `Không thể nghiệm thu. Còn ${pendingDoD.length} tiêu chí nghiệm thu bắt buộc (DoD) chưa hoàn thành: "${pendingDoD[0]}"`,
+        data: { pendingDoD },
+      });
+      return;
+    }
+
+    const updatedTask = await prisma.task.update({
+      where: { id },
+      data: {
+        status: 'DONE',
+        completedAt: new Date(),
+        rejectReason: null,
+      },
+      include: {
+        assignee: { select: { id: true, name: true, avatar: true } },
+        reviewer: { select: { id: true, name: true, avatar: true } },
+        milestone: true,
+        checklists: { include: { completedBy: { select: { id: true, name: true } } } },
+      },
+    });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`project:${currentTask.projectId}`).emit('task:status_changed', {
+        taskId: id,
+        projectId: currentTask.projectId,
+        oldStatus: currentTask.status,
+        newStatus: 'DONE',
+        task: updatedTask,
+      });
+
+      if (currentTask.assigneeId) {
+        io.to(`user:${currentTask.assigneeId}`).emit('task:completed', {
+          taskId: currentTask.id,
+          title: currentTask.title,
+          userId: currentTask.assigneeId,
+        });
+      }
+    }
+
+    if (userId) {
+      await logActivity({
+        userId,
+        action: 'TASK_APPROVED',
+        entityType: 'TASK',
+        entityId: id,
+        description: `Reviewer đã phê duyệt nghiệm thu công việc "${currentTask.title}" sang trạng thái DONE`,
+        metadata: { projectId: currentTask.projectId, status: 'DONE' },
+      });
+    }
+
+    if (currentTask.assigneeId) {
+      await createNotification({
+        userId: currentTask.assigneeId,
+        type: 'TASK_COMPLETED',
+        title: '🎉 Công việc đã được phê duyệt nghiệm thu!',
+        message: `Công việc "${currentTask.title}" đã được Reviewer nghiệm thu thành công sang DONE.`,
+        relatedId: `${currentTask.projectId}:${currentTask.id}`,
+      });
+      await updateTemporaryKpiOnTaskDone(currentTask.assigneeId, currentTask.dueDate);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Đã phê duyệt nghiệm thu công việc thành công!',
+      data: updatedTask,
+    });
+  } catch (error: any) {
+    console.error('Lỗi approveTaskReview:', error);
+    res.status(500).json({ success: false, message: 'Lỗi máy chủ khi phê duyệt công việc.', error: error.message });
+  }
+};
+
+/**
+ * QA / Reviewer từ chối nghiệm thu, trả về IN_PROGRESS kèm lý do
+ */
+export const rejectTaskReview = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { rejectReason } = req.body;
+    const userId = req.user?.id;
+
+    if (!rejectReason || !rejectReason.trim()) {
+      res.status(400).json({ success: false, message: 'Vui lòng cung cấp lý do từ chối để nhân sự chỉnh sửa.' });
+      return;
+    }
+
+    const currentTask = await prisma.task.findUnique({
+      where: { id },
+      include: { project: true },
+    });
+
+    if (!currentTask) {
+      res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
+      return;
+    }
+    if (!req.user || (
+      !(await canManageProject(req.user, currentTask.projectId))
+      && currentTask.reviewerId !== req.user.id
+    )) {
+      res.status(403).json({ success: false, message: 'Chỉ Reviewer được chỉ định hoặc Quản lý dự án mới có quyền từ chối công việc này.' });
+      return;
+    }
+
+    const updatedTask = await prisma.task.update({
+      where: { id },
+      data: {
+        status: 'IN_PROGRESS',
+        completedAt: null,
+        rejectReason: rejectReason.trim(),
+      },
+      include: {
+        assignee: { select: { id: true, name: true, avatar: true } },
+        reviewer: { select: { id: true, name: true, avatar: true } },
+        milestone: true,
+        checklists: { include: { completedBy: { select: { id: true, name: true } } } },
+      },
+    });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`project:${currentTask.projectId}`).emit('task:status_changed', {
+        taskId: id,
+        projectId: currentTask.projectId,
+        oldStatus: currentTask.status,
+        newStatus: 'IN_PROGRESS',
+        task: updatedTask,
+        rejectReason: updatedTask.rejectReason,
+      });
+    }
+
+    if (userId) {
+      await logActivity({
+        userId,
+        action: 'TASK_REJECTED',
+        entityType: 'TASK',
+        entityId: id,
+        description: `Reviewer từ chối nghiệm thu công việc "${currentTask.title}": ${rejectReason}`,
+        metadata: { projectId: currentTask.projectId, rejectReason },
+      });
+    }
+
+    if (currentTask.assigneeId) {
+      await createNotification({
+        userId: currentTask.assigneeId,
+        type: 'TASK_STATUS_CHANGED',
+        title: '⚠️ Công việc bị từ chối kiểm thử',
+        message: `Công việc "${currentTask.title}" bị từ chối với lý do: "${rejectReason.trim()}". Vui lòng kiểm tra và sửa đổi.`,
+        relatedId: `${currentTask.projectId}:${currentTask.id}`,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Đã từ chối nghiệm thu và trả công việc về In Progress.',
+      data: updatedTask,
+    });
+  } catch (error: any) {
+    console.error('Lỗi rejectTaskReview:', error);
+    res.status(500).json({ success: false, message: 'Lỗi máy chủ khi từ chối công việc.', error: error.message });
+  }
+};
+
+/**
+ * Tiêu chí nghiệm thu (Acceptance Criteria / Definition of Done - DoD)
+ */
+export const getTaskChecklists = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const checklists = await prisma.taskChecklist.findMany({
+      where: { taskId: id },
+      include: {
+        completedBy: { select: { id: true, name: true, avatar: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    res.status(200).json({ success: true, data: checklists });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi lấy tiêu chí nghiệm thu.', error: error.message });
+  }
+};
+
+export const createTaskChecklist = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { content, isRequired } = req.body;
+
+    if (!content || !content.trim()) {
+      res.status(400).json({ success: false, message: 'Nội dung tiêu chí nghiệm thu không được để trống.' });
+      return;
+    }
+
+    const checklist = await prisma.taskChecklist.create({
+      data: {
+        taskId: id,
+        content: content.trim(),
+        isRequired: isRequired !== undefined ? Boolean(isRequired) : true,
+        isCompleted: false,
+      },
+      include: {
+        completedBy: { select: { id: true, name: true, avatar: true } },
+      },
+    });
+
+    res.status(201).json({ success: true, message: 'Thêm tiêu chí nghiệm thu thành công.', data: checklist });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi thêm tiêu chí nghiệm thu.', error: error.message });
+  }
+};
+
+export const toggleTaskChecklist = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { checklistId } = req.params;
+    const userId = req.user?.id;
+
+    const current = await prisma.taskChecklist.findUnique({
+      where: { id: checklistId },
+    });
+
+    if (!current) {
+      res.status(404).json({ success: false, message: 'Tiêu chí nghiệm thu không tồn tại.' });
+      return;
+    }
+
+    const nextIsCompleted = !current.isCompleted;
+    const updated = await prisma.taskChecklist.update({
+      where: { id: checklistId },
+      data: {
+        isCompleted: nextIsCompleted,
+        completedById: nextIsCompleted ? userId : null,
+        completedAt: nextIsCompleted ? new Date() : null,
+      },
+      include: {
+        completedBy: { select: { id: true, name: true, avatar: true } },
+      },
+    });
+
+    res.status(200).json({ success: true, message: 'Cập nhật trạng thái tiêu chí thành công.', data: updated });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi cập nhật tiêu chí nghiệm thu.', error: error.message });
+  }
+};
+
+export const deleteTaskChecklist = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { checklistId } = req.params;
+    await prisma.taskChecklist.delete({
+      where: { id: checklistId },
+    });
+
+    res.status(200).json({ success: true, message: 'Xóa tiêu chí nghiệm thu thành công.' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi xóa tiêu chí nghiệm thu.', error: error.message });
+  }
+};
+
+/**
+ * Quản lý Mối quan hệ Phụ thuộc công việc (Task Dependencies)
+ */
+export const getTaskDependencies = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+
+    const [dependencies, dependedBy] = await Promise.all([
+      prisma.taskDependency.findMany({
+        where: { taskId: id },
+        include: {
+          dependsOnTask: {
+            select: { id: true, title: true, status: true, priority: true, dueDate: true, assignee: { select: { name: true } } },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.taskDependency.findMany({
+        where: { dependsOnTaskId: id },
+        include: {
+          task: {
+            select: { id: true, title: true, status: true, priority: true, dueDate: true, assignee: { select: { name: true } } },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        dependencies,
+        dependedBy,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi lấy thông tin phụ thuộc công việc.', error: error.message });
+  }
+};
+
+export const createTaskDependency = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { dependsOnTaskId, type } = req.body;
+
+    if (!dependsOnTaskId) {
+      res.status(400).json({ success: false, message: 'Vui lòng chọn công việc phụ thuộc.' });
+      return;
+    }
+    if (id === dependsOnTaskId) {
+      res.status(400).json({ success: false, message: 'Một công việc không thể tự phụ thuộc vào chính nó.' });
+      return;
+    }
+
+    const [taskA, taskB] = await Promise.all([
+      prisma.task.findUnique({ where: { id } }),
+      prisma.task.findUnique({ where: { id: dependsOnTaskId } }),
+    ]);
+
+    if (!taskA || !taskB) {
+      res.status(404).json({ success: false, message: 'Công việc liên kết không tồn tại.' });
+      return;
+    }
+
+    const dependencyType = ['BLOCKS', 'BLOCKED_BY', 'RELATES_TO'].includes(type) ? type : 'BLOCKS';
+
+    const dependency = await prisma.taskDependency.upsert({
+      where: {
+        taskId_dependsOnTaskId: {
+          taskId: id,
+          dependsOnTaskId,
+        },
+      },
+      update: {
+        type: dependencyType,
+      },
+      create: {
+        taskId: id,
+        dependsOnTaskId,
+        type: dependencyType,
+      },
+      include: {
+        dependsOnTask: {
+          select: { id: true, title: true, status: true, priority: true },
+        },
+      },
+    });
+
+    res.status(201).json({ success: true, message: 'Thêm quan hệ phụ thuộc thành công.', data: dependency });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi thêm quan hệ phụ thuộc.', error: error.message });
+  }
+};
+
+export const deleteTaskDependency = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { dependencyId } = req.params;
+    await prisma.taskDependency.delete({
+      where: { id: dependencyId },
+    });
+
+    res.status(200).json({ success: true, message: 'Xóa quan hệ phụ thuộc thành công.' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi xóa quan hệ phụ thuộc.', error: error.message });
+  }
+};
+
+/**
+ * Quản lý Mốc bàn giao / Giai đoạn dự án (Milestones)
+ */
+export const getProjectMilestones = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { projectId } = req.params;
+    const milestones = await prisma.milestone.findMany({
+      where: { projectId },
+      include: {
+        tasks: {
+          select: { id: true, title: true, status: true, priority: true },
+        },
+      },
+      orderBy: { dueDate: 'asc' },
+    });
+
+    const enriched = milestones.map((m) => {
+      const totalTasks = m.tasks.length;
+      const completedTasks = m.tasks.filter((t) => t.status === 'DONE').length;
+      const progress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+      return {
+        ...m,
+        totalTasks,
+        completedTasks,
+        progress,
+      };
+    });
+
+    res.status(200).json({ success: true, data: enriched });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi lấy danh sách mốc bàn giao dự án.', error: error.message });
+  }
+};
+
+export const createProjectMilestone = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { projectId } = req.params;
+    const { title, description, startDate, dueDate, status } = req.body;
+
+    if (!title || !title.trim()) {
+      res.status(400).json({ success: false, message: 'Tiêu đề mốc bàn giao không được để trống.' });
+      return;
+    }
+
+    const milestone = await prisma.milestone.create({
+      data: {
+        projectId,
+        title: title.trim(),
+        description: description || null,
+        startDate: startDate ? new Date(startDate) : null,
+        dueDate: dueDate ? new Date(dueDate) : null,
+        status: ['PLANNING', 'IN_PROGRESS', 'COMPLETED'].includes(status) ? status : 'PLANNING',
+      },
+    });
+
+    res.status(201).json({ success: true, message: 'Khởi tạo mốc bàn giao thành công.', data: milestone });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi tạo mốc bàn giao.', error: error.message });
+  }
+};
+
+export const updateProjectMilestone = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { title, description, startDate, dueDate, status } = req.body;
+
+    const milestone = await prisma.milestone.update({
+      where: { id },
+      data: {
+        title: title !== undefined ? title.trim() : undefined,
+        description: description !== undefined ? description : undefined,
+        startDate: startDate !== undefined ? (startDate ? new Date(startDate) : null) : undefined,
+        dueDate: dueDate !== undefined ? (dueDate ? new Date(dueDate) : null) : undefined,
+        status: status !== undefined && ['PLANNING', 'IN_PROGRESS', 'COMPLETED'].includes(status) ? status : undefined,
+      },
+    });
+
+    res.status(200).json({ success: true, message: 'Cập nhật mốc bàn giao thành công.', data: milestone });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi cập nhật mốc bàn giao.', error: error.message });
+  }
+};
+
+export const deleteProjectMilestone = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    await prisma.milestone.delete({ where: { id } });
+    res.status(200).json({ success: true, message: 'Xóa mốc bàn giao thành công.' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: 'Lỗi xóa mốc bàn giao.', error: error.message });
   }
 };
 
@@ -1494,5 +2279,198 @@ export const updateTaskDeadline = async (req: AuthenticatedRequest, res: Respons
       message: 'Lỗi máy chủ khi cập nhật hạn chót công việc.',
       error: error.message,
     });
+  }
+};
+
+/**
+ * 12. Ghi nhận giờ làm việc thực tế (Log Work) cho Task
+ * POST /api/tasks/:id/worklogs
+ */
+export const logWorkTask = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id: taskId } = req.params;
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      return;
+    }
+
+    const { hours, description, loggedDate } = req.body;
+    const parsedHours = parseFloat(hours);
+    if (isNaN(parsedHours) || parsedHours <= 0) {
+      res.status(400).json({ success: false, message: 'Số giờ làm việc phải là số dương hợp lệ.' });
+      return;
+    }
+
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      include: { project: true },
+    });
+
+    if (!task) {
+      res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
+      return;
+    }
+
+    if (!req.user || !(await canAccessProject(req.user, task.projectId))) {
+      res.status(403).json({ success: false, message: 'Bạn không có quyền ghi nhận giờ làm cho công việc này.' });
+      return;
+    }
+
+    // 1. Tạo bản ghi WorkLog
+    const workLog = await prisma.workLog.create({
+      data: {
+        taskId,
+        userId,
+        hours: parsedHours,
+        description: description ? description.trim() : null,
+        loggedDate: loggedDate ? new Date(loggedDate) : new Date(),
+      },
+      include: {
+        user: { select: { id: true, name: true, avatar: true, email: true } },
+      },
+    });
+
+    // 2. Tính tổng actualHours từ toàn bộ WorkLog và cập nhật vào Task
+    const allWorkLogs = await prisma.workLog.findMany({
+      where: { taskId },
+      select: { hours: true },
+    });
+    const totalActualHours = Math.round(allWorkLogs.reduce((sum, log) => sum + log.hours, 0) * 10) / 10;
+
+    const updatedTask = await prisma.task.update({
+      where: { id: taskId },
+      data: {
+        actualHours: totalActualHours,
+      },
+      include: {
+        assignee: { select: { id: true, name: true, email: true, avatar: true } },
+        workLogs: {
+          include: { user: { select: { id: true, name: true, avatar: true, email: true } } },
+          orderBy: { loggedDate: 'desc' },
+        },
+      },
+    });
+
+    // 3. Ghi nhận ActivityLog (Audit Trail)
+    await logActivity({
+      userId,
+      action: 'TASK_WORKLOG_LOGGED',
+      entityType: 'TASK',
+      entityId: taskId,
+      description: `Ghi nhận ${parsedHours} giờ làm việc ("${workLog.description || 'Tiến độ công việc'}")`,
+      metadata: { taskId, hours: parsedHours, totalActualHours },
+    });
+
+    // Phát socket
+    const io = req.app?.get ? req.app.get('io') : null;
+    if (io) {
+      io.to(`project:${task.projectId}`).emit('task:worklog_added', {
+        taskId,
+        workLog,
+        totalActualHours,
+      });
+      io.to(`project:${task.projectId}`).emit('task:updated', updatedTask);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Đã ghi nhận thành công ${parsedHours} giờ làm việc!`,
+      data: {
+        workLog,
+        task: updatedTask,
+        actualHours: totalActualHours,
+      },
+    });
+  } catch (error: any) {
+    console.error('Lỗi logWorkTask:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lỗi máy chủ khi ghi nhận giờ làm.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 13. Lấy danh sách WorkLog của Task
+ * GET /api/tasks/:id/worklogs
+ */
+export const getTaskWorkLogs = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id: taskId } = req.params;
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      select: { projectId: true },
+    });
+
+    if (!task) {
+      res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
+      return;
+    }
+
+    if (!req.user || !(await canAccessProject(req.user, task.projectId))) {
+      res.status(403).json({ success: false, message: 'Không có quyền truy cập.' });
+      return;
+    }
+
+    const workLogs = await prisma.workLog.findMany({
+      where: { taskId },
+      include: {
+        user: { select: { id: true, name: true, avatar: true, email: true } },
+      },
+      orderBy: { loggedDate: 'desc' },
+    });
+
+    res.status(200).json({
+      success: true,
+      data: workLogs,
+    });
+  } catch (error: any) {
+    console.error('Lỗi getTaskWorkLogs:', error);
+    res.status(500).json({ success: false, message: 'Lỗi máy chủ.', error: error.message });
+  }
+};
+
+/**
+ * 14. Lấy lịch sử hoạt động (Audit Trail) của Task
+ * GET /api/tasks/:id/activities
+ */
+export const getTaskActivities = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id: taskId } = req.params;
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      select: { projectId: true },
+    });
+
+    if (!task) {
+      res.status(404).json({ success: false, message: 'Công việc không tồn tại.' });
+      return;
+    }
+
+    if (!req.user || !(await canAccessProject(req.user, task.projectId))) {
+      res.status(403).json({ success: false, message: 'Không có quyền truy cập.' });
+      return;
+    }
+
+    const activities = await prisma.activityLog.findMany({
+      where: {
+        entityId: taskId,
+      },
+      include: {
+        user: { select: { id: true, name: true, avatar: true, email: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: activities,
+    });
+  } catch (error: any) {
+    console.error('Lỗi getTaskActivities:', error);
+    res.status(500).json({ success: false, message: 'Lỗi máy chủ.', error: error.message });
   }
 };

@@ -62,7 +62,8 @@ export interface CountdownDetails {
  */
 export const getCountdownDetails = (
   dueDate?: string | Date | null,
-  isCompleted: boolean = false
+  isCompleted: boolean = false,
+  completedAt?: string | Date | null
 ): CountdownDetails => {
   if (!dueDate) {
     return {
@@ -73,11 +74,45 @@ export const getCountdownDetails = (
     };
   }
 
+  // Khi dự án / task đã hoàn thành (tiến độ 100%):
+  // KHÔNG tính theo thời gian hiện tại nữa mà dựa vào mốc hoàn thành thực tế (max completedAt)
   if (isCompleted) {
+    if (completedAt) {
+      const target = new Date(dueDate).getTime();
+      const finish = new Date(completedAt).getTime();
+      if (finish <= target) {
+        return {
+          text: '✓ Hoàn thành đúng hạn',
+          type: 'COMPLETED',
+          badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/80 dark:text-emerald-300 dark:border-emerald-700 font-bold',
+          isOverdue: false,
+        };
+      } else {
+        const diff = finish - target;
+        const days = Math.floor(diff / 86400000);
+        const hours = Math.floor((diff % 86400000) / 3600000);
+        let lateStr = '';
+        if (days > 0) {
+          lateStr = hours > 0 ? `${days} ngày ${hours} giờ` : `${days} ngày`;
+        } else if (hours > 0) {
+          lateStr = `${hours} giờ`;
+        } else {
+          const minutes = Math.floor((diff % 3600000) / 60000);
+          lateStr = `${Math.max(1, minutes)} phút`;
+        }
+        return {
+          text: `✓ Đã hoàn thành (Trễ hạn ${lateStr} so với kế hoạch)`,
+          type: 'COMPLETED',
+          badgeClass: 'bg-amber-100 text-amber-900 border-amber-300 dark:bg-amber-950/80 dark:text-amber-200 dark:border-amber-700 font-bold',
+          isOverdue: false,
+        };
+      }
+    }
+
     return {
-      text: 'Đã hoàn thành',
+      text: '✓ Hoàn thành đúng hạn',
       type: 'COMPLETED',
-      badgeClass: 'bg-emerald-100 text-emerald-700 border-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800 font-semibold',
+      badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/80 dark:text-emerald-300 dark:border-emerald-700 font-bold',
       isOverdue: false,
     };
   }

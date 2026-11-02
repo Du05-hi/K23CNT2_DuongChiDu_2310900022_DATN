@@ -1,6 +1,7 @@
 import express from 'express';
 import {
   breakdownTask,
+  enterpriseTaskBreakdown,
   generateSummary,
   generateMyWorkInsights,
   detectRisks,
@@ -20,6 +21,7 @@ router.post('/query-data', chatWithLiveData);
 
 // 2. Phân tách tự động công việc thành sub-tasks
 router.post('/breakdown', breakdownTask);
+router.post('/task-breakdown', enterpriseTaskBreakdown);
 
 // 3. Nhận xét và phân tích tiến độ dự án
 router.post('/summary', generateSummary);

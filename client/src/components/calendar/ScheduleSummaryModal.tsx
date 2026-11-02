@@ -15,6 +15,8 @@ import {
   CheckSquare,
 } from 'lucide-react';
 
+import { extractDateStr, extractTimeStr } from '@/utils/date';
+
 export interface ScheduleSummaryModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -24,49 +26,7 @@ export interface ScheduleSummaryModalProps {
   onSelectTask?: (taskId: string) => void;
 }
 
-/**
- * Helper trích xuất chuỗi ngày YYYY-MM-DD chuẩn hóa theo local timezone
- */
-export const extractDateStr = (val: any): string => {
-  if (!val) return '';
-  if (val instanceof Date) {
-    if (isNaN(val.getTime())) return '';
-    const y = val.getFullYear();
-    const m = String(val.getMonth() + 1).padStart(2, '0');
-    const day = String(val.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  }
-  if (typeof val === 'string') {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
-    const d = new Date(val);
-    if (!isNaN(d.getTime())) {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${y}-${m}-${day}`;
-    }
-  }
-  return '';
-};
 
-/**
- * Helper trích xuất giờ phút HH:mm theo local timezone
- */
-export const extractTimeStr = (val: any): string => {
-  if (!val) return '';
-  try {
-    const d = new Date(val);
-    if (!isNaN(d.getTime())) {
-      const h = String(d.getHours()).padStart(2, '0');
-      const m = String(d.getMinutes()).padStart(2, '0');
-      return `${h}:${m}`;
-    }
-  } catch {}
-  if (typeof val === 'string' && /^\d{2}:\d{2}/.test(val)) {
-    return val.substring(0, 5);
-  }
-  return '';
-};
 
 export const ScheduleSummaryModal: React.FC<ScheduleSummaryModalProps> = ({
   isOpen,

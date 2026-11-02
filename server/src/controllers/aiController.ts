@@ -3,6 +3,7 @@ import { prisma } from '../config/prisma';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 import {
   taskBreakdown,
+  enterpriseTaskBreakdown as geminiEnterpriseBreakdown,
   generateProgressSummary,
   generatePersonalWorkInsights,
   detectProjectRisks,
@@ -41,6 +42,149 @@ export const breakdownTask = async (req: AuthenticatedRequest, res: Response): P
     res.status(200).json({
       success: false,
       message: 'Trợ lý AI hiện chưa thể phân tích, vui lòng thử lại sau.',
+    });
+  }
+};
+
+/**
+ * Phân rã công việc WBS đa tầng & tự động gán Subtasks + DoD checklist bằng Gemini AI Copilot
+ */
+export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { taskId, taskTitle, title, description, projectScope } = req.body;
+    const resolvedTaskId = taskId || req.params?.id;
+    const userId = req.user?.id;
+
+    if (!resolvedTaskId && !taskTitle && !title) {
+      res.status(400).json({
+        success: false,
+        message: 'Cần cung cấp taskId hoặc tiêu đề công việc để AI thực hiện phân rã.',
+      });
+      return;
+    }
+
+    let currentTask: any = null;
+    let queryTitle = taskTitle || title || '';
+    let queryDescription = description || '';
+    let queryProjectScope = projectScope || '';
+
+    if (resolvedTaskId) {
+      currentTask = await prisma.task.findUnique({
+        where: { id: resolvedTaskId },
+        include: {
+          project: { select: { id: true, name: true } },
+          checklists: true,
+          subtasks: true,
+        },
+      });
+
+      if (!currentTask) {
+        res.status(404).json({ success: false, message: 'Công việc không tồn tại trong hệ thống.' });
+        return;
+      }
+
+      if (!req.user || !(await canAccessProject(req.user, currentTask.projectId))) {
+        res.status(403).json({ success: false, message: 'Bạn không có quyền truy cập dự án của công việc này.' });
+        return;
+      }
+
+      queryTitle = currentTask.title;
+      queryDescription = currentTask.description || queryDescription;
+      queryProjectScope = currentTask.project?.name || queryProjectScope;
+    }
+
+    // Gọi Gemini AI phân tích
+    const suggestions = await geminiEnterpriseBreakdown(queryTitle, queryDescription, queryProjectScope);
+
+    // Nếu có resolvedTaskId, lưu subtasks và DoD vào Database
+    let createdSubtasks: any[] = [];
+    let createdChecklists: any[] = [];
+
+    if (currentTask && userId) {
+      // 1. Đánh dấu task cha isParent = true
+      await prisma.task.update({
+        where: { id: currentTask.id },
+        data: { isParent: true },
+      });
+
+      // 2. Tạo subtasks trong bảng Task
+      const basePosition = currentTask.subtasks?.length || 0;
+      for (let i = 0; i < suggestions.length; i++) {
+        const sub = suggestions[i];
+        const newSubtask = await prisma.task.create({
+          data: {
+            title: sub.title,
+            description: sub.description,
+            status: 'TODO',
+            category: sub.category,
+            priority: sub.priority,
+            estimatedHours: sub.estimatedHours,
+            projectId: currentTask.projectId,
+            parentId: currentTask.id,
+            isParent: false,
+            createdById: userId,
+            position: basePosition + i,
+          },
+          include: {
+            assignee: { select: { id: true, name: true, avatar: true } },
+          },
+        });
+        createdSubtasks.push(newSubtask);
+      }
+
+      // 3. Tạo tiêu chí DoD (TaskChecklist) gắn với task cha
+      const allDodItems: string[] = [];
+      suggestions.forEach((sub) => {
+        if (Array.isArray(sub.dodChecklist)) {
+          sub.dodChecklist.forEach((c) => {
+            if (c && !allDodItems.includes(c)) allDodItems.push(c);
+          });
+        }
+      });
+
+      // Lọc các DoD chưa tồn tại
+      const existingContents = new Set((currentTask.checklists || []).map((c: any) => c.content));
+      const dodToCreate = allDodItems.filter((c) => !existingContents.has(c));
+
+      for (const content of dodToCreate.slice(0, 5)) {
+        const cl = await prisma.taskChecklist.create({
+          data: {
+            taskId: currentTask.id,
+            content,
+            isRequired: true,
+            isCompleted: false,
+          },
+        });
+        createdChecklists.push(cl);
+      }
+
+      // Emit socket cập nhật
+      const io = req.app.get('io');
+      if (io) {
+        io.to(`project:${currentTask.projectId}`).emit('task:wbs_generated', {
+          taskId: currentTask.id,
+          projectId: currentTask.projectId,
+          subtasksCount: createdSubtasks.length,
+          checklistsCount: createdChecklists.length,
+        });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Gemini AI Copilot đã phân rã công việc WBS & thiết lập tiêu chí DoD thành công!',
+      data: {
+        suggestions,
+        createdSubtasks,
+        createdChecklists,
+      },
+    });
+  } catch (error: any) {
+    console.error('[AI][enterpriseTaskBreakdown] Lỗi:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Không thể phân rã công việc bằng AI lúc này.',
+      error: error?.message,
     });
   }
 };

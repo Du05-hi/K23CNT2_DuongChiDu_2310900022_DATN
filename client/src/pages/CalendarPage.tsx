@@ -34,6 +34,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useSocket } from '@/hooks/useSocket';
 import CountdownBadge from '@/components/ui/CountdownBadge';
 import { formatDateTime, formatDateOnly, pad } from '@/utils/deadline';
+import { extractDateStr, toDateKey, getLocalDateString, extractTimeStr, getTimeString } from '@/utils/date';
 import TaskDetailsModal from '@/components/TaskDetailsModal';
 import VoiceCommandModal, { type ParsedVoiceCommand } from '@/components/calendar/VoiceCommandModal';
 import ScheduleSummaryModal from '@/components/calendar/ScheduleSummaryModal';
@@ -67,51 +68,7 @@ interface TaskDeadlineItem {
   isOverdue?: boolean;
 }
 
-// Helper chuẩn hóa chuỗi ngày an toàn tuyệt đối theo local timezone tránh lỗi lệch múi giờ
-export const extractDateStr = (val: any): string => {
-  if (!val) return '';
-  if (val instanceof Date) {
-    if (isNaN(val.getTime())) return '';
-    const y = val.getFullYear();
-    const m = String(val.getMonth() + 1).padStart(2, '0');
-    const day = String(val.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  }
-  if (typeof val === 'string') {
-    // Nếu là chuỗi dạng chuẩn "YYYY-MM-DD" không có giờ, trả về ngay
-    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
-    // Chuyển đổi sang Date để lấy đúng ngày theo múi giờ địa phương (local timezone) của trình duyệt
-    const d = new Date(val);
-    if (!isNaN(d.getTime())) {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${y}-${m}-${day}`;
-    }
-  }
-  return '';
-};
-
-export const toDateKey = extractDateStr;
-export const getLocalDateString = extractDateStr;
-
-export const extractTimeStr = (val: any): string => {
-  if (!val) return '';
-  try {
-    const d = new Date(val);
-    if (!isNaN(d.getTime())) {
-      const h = String(d.getHours()).padStart(2, '0');
-      const m = String(d.getMinutes()).padStart(2, '0');
-      return `${h}:${m}`;
-    }
-  } catch {}
-  if (typeof val === 'string' && /^\d{2}:\d{2}/.test(val)) {
-    return val.substring(0, 5);
-  }
-  return '';
-};
-
-export const getTimeString = extractTimeStr;
+// Helper chuẩn hóa ngày giờ được import từ '@/utils/date' để đảm bảo Vite Fast Refresh (HMR)
 
 const DAYS_OF_WEEK = ['Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7', 'Chủ Nhật'];
 

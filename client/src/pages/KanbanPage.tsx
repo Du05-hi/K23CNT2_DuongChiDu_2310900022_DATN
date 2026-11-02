@@ -24,9 +24,12 @@ import {
   Mic,
   Scale,
   Sparkles,
+  Lock,
+  ShieldCheck,
+  Flag,
 } from 'lucide-react';
 import { useSocket } from '@/hooks/useSocket';
-import taskService, { type Task } from '@/services/taskService';
+import taskService, { type Task, type Milestone } from '@/services/taskService';
 import projectService from '@/services/projectService';
 import { toast } from 'sonner';
 import { useAuth } from '@/hooks/useAuth';
@@ -44,11 +47,27 @@ interface KanbanTask {
   description: string;
   status: 'TODO' | 'IN_PROGRESS' | 'REVIEW' | 'DONE';
   priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+  category?: 'CORE_PROJECT' | 'RD' | 'OPERATIONS' | null;
+  estimatedHours?: number | null;
+  actualHours?: number | null;
+  completedAt?: string | null;
   assigneeId?: string | null;
   assignee: string;
+  reviewerId?: string | null;
+  reviewerName?: string | null;
+  milestoneId?: string | null;
+  milestoneTitle?: string | null;
+  rejectReason?: string | null;
+  blockingTaskTitle?: string | null;
+  isBlocked?: boolean;
   dueDate: string;
   dueDateValue?: string;
   attachmentsCount: number;
+  parentId?: string | null;
+  parentTaskTitle?: string | null;
+  isParent?: boolean;
+  subtasksCount?: number;
+  doneSubtasksCount?: number;
 }
 
 const COLUMNS: Array<{ id: KanbanTask['status']; label: string; color: string; badgeColor: string }> = [
@@ -58,18 +77,54 @@ const COLUMNS: Array<{ id: KanbanTask['status']; label: string; color: string; b
   { id: 'DONE', label: 'Hoàn thành (Done)', color: 'border-emerald-500', badgeColor: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' },
 ];
 
-const toKanbanTask = (task: Task, previous?: KanbanTask): KanbanTask => ({
-  id: task.id,
-  title: task.title,
-  description: task.description || '',
-  status: task.status,
-  priority: task.priority,
-  assigneeId: task.assigneeId,
-  assignee: task.assignee?.name || 'Chưa giao',
-  dueDate: task.dueDate ? formatDateTime(task.dueDate) : 'Chưa đặt hạn',
-  dueDateValue: task.dueDate,
-  attachmentsCount: task._count?.attachments ?? task.attachments?.length ?? previous?.attachmentsCount ?? 0,
-});
+const toKanbanTask = (task: Task, previous?: KanbanTask): KanbanTask => {
+  const isParentFlag = task.isParent ?? (task.subtasks && task.subtasks.length > 0) ?? previous?.isParent ?? false;
+  const subtasks = task.subtasks || [];
+  const subtasksCount = task._count?.subtasks ?? subtasks.length ?? previous?.subtasksCount ?? 0;
+  const doneSubtasksCount = subtasks.length > 0
+    ? subtasks.filter((s: any) => s.status === 'DONE').length
+    : (previous?.doneSubtasksCount ?? 0);
+
+  // Tính toán trạng thái bị chặn
+  const blockedByDeps = (task.dependencies || []).filter(
+    (d) => d.type === 'BLOCKED_BY' && d.dependsOnTask?.status !== 'DONE'
+  );
+  const blockedByBlocks = (task.dependedBy || []).filter(
+    (d) => d.type === 'BLOCKS' && d.task?.status !== 'DONE'
+  );
+  const firstBlockingTask = blockedByDeps[0]?.dependsOnTask || blockedByBlocks[0]?.task;
+  const isBlocked = Boolean(firstBlockingTask) || (previous?.isBlocked ?? false);
+  const blockingTaskTitle = firstBlockingTask?.title || previous?.blockingTaskTitle || null;
+
+  return {
+    id: task.id,
+    title: task.title,
+    description: task.description || '',
+    status: task.status,
+    priority: task.priority,
+    category: task.category ?? previous?.category,
+    estimatedHours: task.estimatedHours ?? previous?.estimatedHours,
+    actualHours: task.actualHours ?? previous?.actualHours,
+    completedAt: task.completedAt ?? previous?.completedAt,
+    assigneeId: task.assigneeId,
+    assignee: task.assignee?.name || 'Chưa giao',
+    reviewerId: task.reviewerId ?? task.reviewer?.id ?? previous?.reviewerId ?? null,
+    reviewerName: task.reviewer?.name ?? previous?.reviewerName ?? null,
+    milestoneId: task.milestoneId ?? task.milestone?.id ?? previous?.milestoneId ?? null,
+    milestoneTitle: task.milestone?.title ?? previous?.milestoneTitle ?? null,
+    rejectReason: task.rejectReason ?? previous?.rejectReason ?? null,
+    isBlocked,
+    blockingTaskTitle,
+    dueDate: task.dueDate ? formatDateTime(task.dueDate) : 'Chưa đặt hạn',
+    dueDateValue: task.dueDate,
+    attachmentsCount: task._count?.attachments ?? task.attachments?.length ?? previous?.attachmentsCount ?? 0,
+    parentId: task.parentId ?? previous?.parentId ?? null,
+    parentTaskTitle: task.parentTask?.title ?? previous?.parentTaskTitle ?? null,
+    isParent: isParentFlag,
+    subtasksCount,
+    doneSubtasksCount,
+  };
+};
 
 export const KanbanPage: React.FC = () => {
   const { id: projectId } = useParams<{ id: string }>();
@@ -89,8 +144,12 @@ export const KanbanPage: React.FC = () => {
   // Filters State
   const [searchText, setSearchText] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('ALL');
+  const [wbsFilter, setWbsFilter] = useState<'ALL' | 'PARENT_ONLY' | 'CHILD_ONLY'>('ALL');
   const [onlyMyTasks, setOnlyMyTasks] = useState(false);
   const [urgentOrOverdue, setUrgentOrOverdue] = useState(false);
+  const [milestonesList, setMilestonesList] = useState<Milestone[]>([]);
+  const [milestoneFilter, setMilestoneFilter] = useState('ALL');
+  const [dependencyFilter, setDependencyFilter] = useState<'ALL' | 'READY' | 'BLOCKED'>('ALL');
 
   // Modal & Edit State
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -100,6 +159,7 @@ export const KanbanPage: React.FC = () => {
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [newTaskDescription, setNewTaskDescription] = useState('');
   const [newTaskPriority, setNewTaskPriority] = useState<Task['priority']>('MEDIUM');
+  const [newTaskCategory, setNewTaskCategory] = useState<'CORE_PROJECT' | 'RD' | 'OPERATIONS'>('CORE_PROJECT');
   const [newTaskDueDate, setNewTaskDueDate] = useState('');
   const [newTaskAssigneeId, setNewTaskAssigneeId] = useState('');
   const [users, setUsers] = useState<Pick<User, 'id' | 'name' | 'email'>[]>([]);
@@ -130,7 +190,7 @@ export const KanbanPage: React.FC = () => {
     };
   }, [canManageTasks]);
 
-  // 2. Fetch Project Details
+  // 2. Fetch Project Details & Milestones
   useEffect(() => {
     if (!projectId) return;
     let active = true;
@@ -141,6 +201,15 @@ export const KanbanPage: React.FC = () => {
       .catch((err) => {
         console.warn('Không thể tải chi tiết dự án:', err);
       });
+
+    taskService.getProjectMilestones(projectId)
+      .then((data) => {
+        if (active) setMilestonesList(data);
+      })
+      .catch((err) => {
+        console.warn('Không thể tải mốc bàn giao dự án:', err);
+      });
+
     return () => {
       active = false;
     };
@@ -155,7 +224,20 @@ export const KanbanPage: React.FC = () => {
     taskService
       .getTasksByProject(projectId)
       .then((projectTasks) => {
-        setTasks(projectTasks.map((task) => toKanbanTask(task)));
+        const taskMap = new Map<string, string>();
+        projectTasks.forEach((t) => {
+          taskMap.set(t.id, t.title);
+        });
+
+        setTasks(
+          projectTasks.map((task) => {
+            const kt = toKanbanTask(task);
+            if (kt.parentId && !kt.parentTaskTitle && taskMap.has(kt.parentId)) {
+              kt.parentTaskTitle = taskMap.get(kt.parentId);
+            }
+            return kt;
+          })
+        );
       })
       .catch((error: unknown) => {
         console.error('Không thể tải công việc của dự án:', error);
@@ -302,9 +384,10 @@ export const KanbanPage: React.FC = () => {
         const statusLabel = COLUMNS.find((c) => c.id === targetStatus)?.label || targetStatus;
         toast.success(`Đã cập nhật trạng thái: ${statusLabel}`);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Không thể cập nhật trạng thái công việc:', error);
-      toast.error('Không thể cập nhật trạng thái công việc.');
+      const msg = error?.response?.data?.message || 'Không thể cập nhật trạng thái công việc.';
+      toast.error(msg, { duration: 5000 });
     }
   };
 
@@ -318,6 +401,7 @@ export const KanbanPage: React.FC = () => {
         status,
         description: newTaskDescription.trim() || undefined,
         priority: newTaskPriority,
+        category: newTaskCategory,
         dueDate: newTaskDueDate ? fromDatetimeLocalToIso(newTaskDueDate) || undefined : undefined,
         assigneeId: newTaskAssigneeId || undefined,
       });
@@ -329,6 +413,7 @@ export const KanbanPage: React.FC = () => {
       setNewTaskTitle('');
       setNewTaskDescription('');
       setNewTaskPriority('MEDIUM');
+      setNewTaskCategory('CORE_PROJECT');
       setNewTaskDueDate('');
       setNewTaskAssigneeId('');
       setActiveColumn(null);
@@ -353,13 +438,31 @@ export const KanbanPage: React.FC = () => {
     ).length;
   }, [tasks]);
 
-  const isAnyFilterActive = searchText.trim() !== '' || priorityFilter !== 'ALL' || onlyMyTasks || urgentOrOverdue;
+  const parentTasksCount = useMemo(() => {
+    return tasks.filter((t) => t.isParent || (t.subtasksCount != null && t.subtasksCount > 0)).length;
+  }, [tasks]);
+
+  const subtasksCount = useMemo(() => {
+    return tasks.filter((t) => !!t.parentId).length;
+  }, [tasks]);
+
+  const isAnyFilterActive =
+    searchText.trim() !== '' ||
+    priorityFilter !== 'ALL' ||
+    milestoneFilter !== 'ALL' ||
+    dependencyFilter !== 'ALL' ||
+    onlyMyTasks ||
+    urgentOrOverdue ||
+    wbsFilter !== 'ALL';
 
   const handleResetFilters = () => {
     setSearchText('');
     setPriorityFilter('ALL');
+    setMilestoneFilter('ALL');
+    setDependencyFilter('ALL');
     setOnlyMyTasks(false);
     setUrgentOrOverdue(false);
+    setWbsFilter('ALL');
   };
 
   // Export Project Report as CSV (UTF-8 with BOM for Vietnamese Excel)
@@ -549,6 +652,67 @@ export const KanbanPage: React.FC = () => {
 
         {/* Các nút bấm lọc nhanh (Quick Filter Pills) */}
         <div className="flex flex-wrap items-center gap-2">
+          {/* Lọc theo cấu trúc WBS */}
+          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-0.5 rounded-xl border border-slate-200 dark:border-slate-750">
+            <button
+              type="button"
+              onClick={() => setWbsFilter('ALL')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                wbsFilter === 'ALL'
+                  ? 'bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              Tất cả việc
+            </button>
+            <button
+              type="button"
+              onClick={() => setWbsFilter('PARENT_ONLY')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                wbsFilter === 'PARENT_ONLY'
+                  ? 'bg-purple-600 text-white shadow-sm shadow-purple-500/20'
+                  : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+              title="Chỉ hiển thị các công việc lớn / giai đoạn (Parent Tasks)"
+            >
+              <span>📦 Việc lớn</span>
+              {parentTasksCount > 0 && (
+                <span
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                    wbsFilter === 'PARENT_ONLY'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {parentTasksCount}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setWbsFilter('CHILD_ONLY')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                wbsFilter === 'CHILD_ONLY'
+                  ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20'
+                  : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+              title="Chỉ hiển thị các công việc con (Subtasks)"
+            >
+              <span>🏷️ Việc con</span>
+              {subtasksCount > 0 && (
+                <span
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                    wbsFilter === 'CHILD_ONLY'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {subtasksCount}
+                </span>
+              )}
+            </button>
+          </div>
+
           {/* Lọc: Chỉ việc của tôi */}
           <button
             type="button"
@@ -589,6 +753,37 @@ export const KanbanPage: React.FC = () => {
             )}
           </button>
 
+          {/* Lọc theo Milestone / Giai đoạn */}
+          <div className="flex items-center gap-1.5">
+            <Flag className="h-3.5 w-3.5 text-violet-500" />
+            <select
+              value={milestoneFilter}
+              onChange={(event) => setMilestoneFilter(event.target.value)}
+              className="rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-700 outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
+            >
+              <option value="ALL">Mọi giai đoạn (Milestones)</option>
+              {milestonesList.map((m) => (
+                <option key={m.id} value={m.id}>
+                  Mốc: {m.title}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Lọc theo Phụ thuộc */}
+          <div className="flex items-center gap-1.5">
+            <Lock className="h-3.5 w-3.5 text-rose-500" />
+            <select
+              value={dependencyFilter}
+              onChange={(event) => setDependencyFilter(event.target.value as any)}
+              className="rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-700 outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
+            >
+              <option value="ALL">Mọi phụ thuộc</option>
+              <option value="READY">🚀 Sẵn sàng làm (Không bị chặn)</option>
+              <option value="BLOCKED">🔒 Đang bị chặn (Blocked)</option>
+            </select>
+          </div>
+
           {/* Lọc theo mức độ ưu tiên */}
           <div className="flex items-center gap-1.5">
             <SlidersHorizontal className="h-3.5 w-3.5 text-slate-400" />
@@ -627,14 +822,22 @@ export const KanbanPage: React.FC = () => {
           const colTasks = tasks.filter((task) => {
             if (task.status !== col.id) return false;
             if (priorityFilter !== 'ALL' && task.priority !== priorityFilter) return false;
+            if (milestoneFilter !== 'ALL' && task.milestoneId !== milestoneFilter) return false;
+            if (dependencyFilter === 'READY' && task.isBlocked) return false;
+            if (dependencyFilter === 'BLOCKED' && !task.isBlocked) return false;
             if (onlyMyTasks && task.assigneeId !== user?.id) return false;
             if (urgentOrOverdue) {
               const isOverdue = task.dueDateValue && new Date(task.dueDateValue) < new Date() && task.status !== 'DONE';
               const isUrgent = task.priority === 'URGENT';
               if (!isOverdue && !isUrgent) return false;
             }
+            if (wbsFilter === 'PARENT_ONLY') {
+              if (!task.isParent && (!task.subtasksCount || task.subtasksCount === 0)) return false;
+            } else if (wbsFilter === 'CHILD_ONLY') {
+              if (!task.parentId) return false;
+            }
             if (query) {
-              const matchesSearch = [task.title, task.description, task.assignee]
+              const matchesSearch = [task.title, task.description, task.assignee, task.parentTaskTitle || '']
                 .some((value) => value.toLocaleLowerCase('vi').includes(query));
               if (!matchesSearch) return false;
             }
@@ -675,24 +878,51 @@ export const KanbanPage: React.FC = () => {
                           : 'border-slate-200/60 dark:border-slate-700/60'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
-                        <span
-                          className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${
-                            task.priority === 'URGENT' || task.priority === 'HIGH'
-                              ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-400'
+                      <div className="flex items-center justify-between gap-1 flex-wrap">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${
+                              task.priority === 'URGENT' || task.priority === 'HIGH'
+                                ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-400'
+                                : task.priority === 'MEDIUM'
+                                ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400'
+                                : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'
+                            }`}
+                          >
+                            {task.priority === 'URGENT'
+                              ? 'KHẨN CẤP'
+                              : task.priority === 'HIGH'
+                              ? 'ƯU TIÊN CAO'
                               : task.priority === 'MEDIUM'
-                              ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400'
-                              : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'
-                          }`}
-                        >
-                          {task.priority === 'URGENT'
-                            ? 'KHẨN CẤP'
-                            : task.priority === 'HIGH'
-                            ? 'ƯU TIÊN CAO'
-                            : task.priority === 'MEDIUM'
-                            ? 'TRUNG BÌNH'
-                            : 'THẤP'}
-                        </span>
+                              ? 'TRUNG BÌNH'
+                              : 'THẤP'}
+                          </span>
+
+                          {task.category && (
+                            <span
+                              className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-md border ${
+                                task.category === 'CORE_PROJECT'
+                                  ? 'bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/40 dark:text-purple-300 dark:border-purple-800'
+                                  : task.category === 'RD'
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
+                                  : 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-800'
+                              }`}
+                              title={
+                                task.category === 'CORE_PROJECT'
+                                  ? 'Dự án cốt lõi (Hệ số quy đổi 1:3)'
+                                  : task.category === 'RD'
+                                  ? 'Nghiên cứu & Phát triển (Hạn mức trần 500h)'
+                                  : 'Vận hành (Định mức chuẩn 660h)'
+                              }
+                            >
+                              {task.category === 'CORE_PROJECT'
+                                ? '1:3'
+                                : task.category === 'RD'
+                                ? 'Trần 500h'
+                                : '660h'}
+                            </span>
+                          )}
+                        </div>
 
                         {/* Dropdown nhanh chuyển trạng thái */}
                         <select
@@ -710,6 +940,55 @@ export const KanbanPage: React.FC = () => {
                         </select>
                       </div>
 
+                      {/* Hiển thị thẻ bị chặn */}
+                      {task.isBlocked && task.status !== 'DONE' && (
+                        <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-rose-100 text-rose-800 dark:bg-rose-950/70 dark:text-rose-300 border border-rose-300 dark:border-rose-900 w-fit animate-pulse">
+                          <Lock className="w-3 h-3 text-rose-600 shrink-0" />
+                          <span className="truncate max-w-[200px]">
+                            🔒 Bị khóa bởi #{task.blockingTaskTitle || 'Task tiền đề'}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Hiển thị Milestone tag */}
+                      {task.milestoneTitle && (
+                        <div className="inline-flex items-center gap-1 text-[9px] font-bold text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-950/60 px-1.5 py-0.5 rounded-md border border-violet-200 dark:border-violet-800 w-fit">
+                          <Flag className="w-2.5 h-2.5 text-violet-500" />
+                          <span>{task.milestoneTitle}</span>
+                        </div>
+                      )}
+
+                      {/* Reviewer phụ trách duyệt khi ở cột REVIEW */}
+                      {col.id === 'REVIEW' && (
+                        <div className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/60 px-2 py-0.5 rounded-lg border border-amber-200 dark:border-amber-800 w-fit">
+                          <ShieldCheck className="w-3 h-3 text-amber-600 shrink-0" />
+                          <span>QA: {task.reviewerName || 'Chưa gán'}</span>
+                        </div>
+                      )}
+
+                      {/* Phân cấp WBS (Công việc lớn / Công việc con) */}
+                      {task.parentId ? (
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedTaskId(task.parentId!);
+                          }}
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 px-2 py-0.5 rounded-lg border border-indigo-200/80 dark:border-indigo-800/80 transition-colors cursor-pointer max-w-full"
+                          title="Nhấn để xem công việc cha (Parent Task)"
+                        >
+                          <span className="shrink-0">🏷️ Thuộc việc lớn:</span>
+                          <span className="truncate max-w-[160px] font-bold">{task.parentTaskTitle || 'Công việc cha'}</span>
+                        </div>
+                      ) : (task.isParent || (task.subtasksCount != null && task.subtasksCount > 0)) ? (
+                        <div className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/60 px-2 py-0.5 rounded-lg border border-purple-200/80 dark:border-purple-800/80 w-fit">
+                          <span>📦 WBS:</span>
+                          <span className="font-bold text-purple-900 dark:text-purple-100">
+                            {task.doneSubtasksCount ?? 0}/{task.subtasksCount ?? 0} xong (
+                            {task.subtasksCount ? Math.round(((task.doneSubtasksCount ?? 0) / task.subtasksCount) * 100) : 0}%)
+                          </span>
+                        </div>
+                      ) : null}
+
                       <button
                         type="button"
                         onClick={() => setSelectedTaskId(task.id)}
@@ -722,6 +1001,27 @@ export const KanbanPage: React.FC = () => {
                         <p className="text-[11px] text-slate-500 line-clamp-2">
                           {task.description}
                         </p>
+                      )}
+
+                      {/* Work hours progress indicator */}
+                      {(task.estimatedHours != null || (task.actualHours != null && task.actualHours > 0)) && (
+                        <div className="flex items-center justify-between text-[10px] text-slate-500 bg-slate-50 dark:bg-slate-900/60 px-2 py-1 rounded-lg">
+                          <span className="flex items-center gap-1 font-medium">
+                            <Clock className="w-3 h-3 text-indigo-500" />
+                            {task.actualHours ?? 0}h / {task.estimatedHours ?? 0}h
+                          </span>
+                          {task.estimatedHours != null && task.estimatedHours > 0 && (
+                            <span
+                              className={`font-semibold ${
+                                ((task.actualHours || 0) / task.estimatedHours) > 1
+                                  ? 'text-rose-500'
+                                  : 'text-slate-400'
+                              }`}
+                            >
+                              {Math.round(((task.actualHours || 0) / task.estimatedHours) * 100)}%
+                            </span>
+                          )}
+                        </div>
                       )}
 
                       <div className="pt-2 border-t border-slate-100 dark:border-slate-700/60 flex items-center justify-between text-[10px] text-slate-400">
@@ -799,14 +1099,24 @@ export const KanbanPage: React.FC = () => {
                           <option value="HIGH">Ưu tiên cao</option>
                           <option value="URGENT">Khẩn cấp</option>
                         </select>
-                        <input
-                          type="datetime-local"
-                          value={newTaskDueDate}
-                          onChange={(e) => setNewTaskDueDate(e.target.value)}
-                          aria-label="Hạn hoàn thành"
-                          className="min-w-0 rounded-lg border border-slate-200 bg-transparent px-2 py-1.5 text-xs dark:border-slate-700"
-                        />
+                        <select
+                          value={newTaskCategory}
+                          onChange={(e) => setNewTaskCategory(e.target.value as any)}
+                          aria-label="Loại hình công việc"
+                          className="min-w-0 rounded-lg border border-slate-200 bg-transparent px-2 py-1.5 text-xs dark:border-slate-700 font-medium"
+                        >
+                          <option value="CORE_PROJECT">Dự án cốt lõi (1:3)</option>
+                          <option value="RD">R&D (Trần 500h)</option>
+                          <option value="OPERATIONS">Vận hành (660h)</option>
+                        </select>
                       </div>
+                      <input
+                        type="datetime-local"
+                        value={newTaskDueDate}
+                        onChange={(e) => setNewTaskDueDate(e.target.value)}
+                        aria-label="Hạn hoàn thành"
+                        className="w-full rounded-lg border border-slate-200 bg-transparent px-2 py-1.5 text-xs dark:border-slate-700"
+                      />
                       <select
                         value={newTaskAssigneeId}
                         onChange={(e) => setNewTaskAssigneeId(e.target.value)}
@@ -877,7 +1187,10 @@ export const KanbanPage: React.FC = () => {
               )
             );
           }}
-          onClose={() => setSelectedTaskId(null)}
+          onClose={() => {
+            setSelectedTaskId(null);
+            loadProjectTasks();
+          }}
         />
       )}
 

@@ -249,22 +249,55 @@ export const getAllProjects = async (req: AuthenticatedRequest, res: Response): 
             members: true,
           },
         },
-        tasks: { select: { status: true } },
+        tasks: {
+          select: {
+            id: true,
+            status: true,
+            completedAt: true,
+            updatedAt: true,
+          },
+        },
       },
       orderBy: {
         createdAt: 'desc',
       },
     });
-    const projects = projectRecords.map(({ tasks, ...project }) => ({
-      ...project,
-      taskCount: {
-        total: tasks.length,
-        completed: tasks.filter((task) => task.status === 'DONE').length,
-        inProgress: tasks.filter((task) => task.status === 'IN_PROGRESS').length,
-        todo: tasks.filter((task) => task.status === 'TODO').length,
-        review: tasks.filter((task) => task.status === 'REVIEW').length,
-      },
-    }));
+    const projects = projectRecords.map(({ tasks, ...project }) => {
+      const total = tasks.length;
+      const completed = tasks.filter((task) => task.status === 'DONE').length;
+      const inProgress = tasks.filter((task) => task.status === 'IN_PROGRESS').length;
+      const todo = tasks.filter((task) => task.status === 'TODO').length;
+      const review = tasks.filter((task) => task.status === 'REVIEW').length;
+      const progress = total > 0 ? Math.round((completed / total) * 100) : 0;
+      const isCompleted = project.status === 'COMPLETED' || (total > 0 && completed === total);
+
+      // Tìm ngày hoàn thành của task cuối cùng (max(completedAt))
+      const completedTasks = tasks.filter((t) => t.status === 'DONE');
+      let lastCompletedAt: Date | null = null;
+      if (completedTasks.length > 0) {
+        const timestamps = completedTasks
+          .map((t) => (t.completedAt ? new Date(t.completedAt).getTime() : new Date(t.updatedAt).getTime()))
+          .filter((t) => !isNaN(t));
+        if (timestamps.length > 0) {
+          lastCompletedAt = new Date(Math.max(...timestamps));
+        }
+      }
+
+      return {
+        ...project,
+        lastCompletedAt,
+        isCompleted,
+        taskCount: {
+          total,
+          completed,
+          inProgress,
+          todo,
+          review,
+          progress,
+          lastCompletedAt,
+        },
+      };
+    });
 
     res.status(200).json({
       success: true,
@@ -309,6 +342,8 @@ export const getProjectById = async (req: AuthenticatedRequest, res: Response): 
             status: true,
             priority: true,
             dueDate: true,
+            completedAt: true,
+            updatedAt: true,
             estimatedHours: true,
             actualHours: true,
             assignee: {
@@ -331,17 +366,33 @@ export const getProjectById = async (req: AuthenticatedRequest, res: Response): 
 
     // Thống kê nhanh số lượng task
     const totalTasks = project.tasks.length;
-    const completedTasks = project.tasks.filter((t) => t.status === 'DONE').length;
+    const completedTasksList = project.tasks.filter((t) => t.status === 'DONE');
+    const completedTasks = completedTasksList.length;
     const progress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+    const isCompleted = project.status === 'COMPLETED' || (totalTasks > 0 && completedTasks === totalTasks);
+
+    let lastCompletedAt: Date | null = null;
+    if (completedTasksList.length > 0) {
+      const timestamps = completedTasksList
+        .map((t) => (t.completedAt ? new Date(t.completedAt).getTime() : new Date(t.updatedAt).getTime()))
+        .filter((t) => !isNaN(t));
+      if (timestamps.length > 0) {
+        lastCompletedAt = new Date(Math.max(...timestamps));
+      }
+    }
 
     res.status(200).json({
       success: true,
       data: {
         ...project,
+        lastCompletedAt,
+        isCompleted,
         stats: {
           totalTasks,
           completedTasks,
           progress,
+          lastCompletedAt,
+          isCompleted,
         },
       },
     });

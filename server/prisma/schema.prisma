@@ -26,11 +26,29 @@ enum ProjectMemberRole {
   VIEWER
 }
 
+enum MilestoneStatus {
+  PLANNING
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum DependencyType {
+  BLOCKS
+  BLOCKED_BY
+  RELATES_TO
+}
+
 enum TaskStatus {
   TODO
   IN_PROGRESS
   REVIEW
   DONE
+}
+
+enum TaskCategory {
+  CORE_PROJECT
+  RD
+  OPERATIONS
 }
 
 enum TaskPriority {
@@ -79,8 +97,12 @@ model User {
   comments        Comment[]
   uploadedFiles   TaskAttachment[] @relation("AttachmentUploader")
   kpiLogs         KpiLog[]
+  workLogs        WorkLog[]
+  payrollRecords  PayrollRecord[]
   notifications   Notification[]
   activityLogs    ActivityLog[]
+  reviewedTasks   Task[]          @relation("TaskReviewer")
+  completedChecklists TaskChecklist[] @relation("ChecklistCompletedBy")
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 }
@@ -98,6 +120,7 @@ model Project {
   creator      User            @relation("ProjectCreator", fields: [createdById], references: [id])
   members      ProjectMember[]
   tasks        Task[]
+  milestones   Milestone[]
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 }
@@ -115,26 +138,97 @@ model ProjectMember {
 }
 
 model Task {
-  id             String          @id @default(uuid())
-  title          String
-  description    String?
-  status         TaskStatus      @default(TODO)
-  priority       TaskPriority    @default(MEDIUM)
-  dueDate        DateTime?
-  position       Int             @default(0)
-  estimatedHours Float?
-  actualHours    Float?
-  projectId      String
-  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  assigneeId     String?
-  assignee       User?           @relation("TaskAssignee", fields: [assigneeId], references: [id])
-  createdById    String
-  creator        User            @relation("TaskCreator", fields: [createdById], references: [id])
-  subTasks       SubTask[]
-  comments       Comment[]
-  attachments    TaskAttachment[]
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  id              String          @id @default(uuid())
+  title           String
+  description     String?
+  status          TaskStatus      @default(TODO)
+  category        TaskCategory    @default(CORE_PROJECT)
+  priority        TaskPriority    @default(MEDIUM)
+  dueDate         DateTime?
+  completedAt     DateTime?
+  position        Int             @default(0)
+  estimatedHours  Float?
+  actualHours     Float?
+  kpiBonusScore   Float?          @default(0)
+  kpiPenaltyScore Float?          @default(0)
+  projectId       String
+  project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assigneeId      String?
+  assignee        User?           @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  createdById     String
+  creator         User            @relation("TaskCreator", fields: [createdById], references: [id])
+  subTasks        SubTask[]
+  comments        Comment[]
+  attachments     TaskAttachment[]
+  workLogs        WorkLog[]
+  reviewerId      String?
+  reviewer        User?           @relation("TaskReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+  milestoneId     String?
+  milestone       Milestone?      @relation(fields: [milestoneId], references: [id], onDelete: SetNull)
+  rejectReason    String?         @db.Text
+  dependencies    TaskDependency[] @relation("TaskDependencies")
+  dependedBy      TaskDependency[] @relation("TaskDependedBy")
+  checklists      TaskChecklist[]
+
+  // Tự liên kết (Self-relation) để tạo cấu trúc cây Công việc lớn - Công việc con (WBS)
+  parentId        String?
+  parentTask      Task?           @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks        Task[]          @relation("TaskSubtasks")
+  isParent        Boolean         @default(false)
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([parentId])
+  @@index([reviewerId])
+  @@index([milestoneId])
+}
+
+model Milestone {
+  id          String          @id @default(uuid())
+  projectId   String
+  project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title       String
+  description String?         @db.Text
+  startDate   DateTime?
+  dueDate     DateTime?
+  status      MilestoneStatus @default(PLANNING)
+  tasks       Task[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([projectId])
+}
+
+model TaskDependency {
+  id              String         @id @default(uuid())
+  taskId          String
+  task            Task           @relation("TaskDependencies", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOnTaskId String
+  dependsOnTask   Task           @relation("TaskDependedBy", fields: [dependsOnTaskId], references: [id], onDelete: Cascade)
+  type            DependencyType @default(BLOCKS)
+  createdAt       DateTime       @default(now())
+
+  @@unique([taskId, dependsOnTaskId])
+  @@index([taskId])
+  @@index([dependsOnTaskId])
+}
+
+model TaskChecklist {
+  id            String    @id @default(uuid())
+  taskId        String
+  task          Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  content       String    @db.Text
+  isRequired    Boolean   @default(true)
+  isCompleted   Boolean   @default(false)
+  completedById String?
+  completedBy   User?     @relation("ChecklistCompletedBy", fields: [completedById], references: [id], onDelete: SetNull)
+  completedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([taskId])
+  @@index([completedById])
 }
 
 model TaskAttachment {
@@ -226,4 +320,75 @@ model ActivityLog {
   description String
   metadata    Json?
   createdAt   DateTime @default(now())
+}
+
+model WorkLog {
+  id          String   @id @default(uuid())
+  taskId      String
+  task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hours       Float
+  description String?  @db.Text
+  loggedDate  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([taskId])
+  @@index([userId])
+}
+
+model PayrollPeriod {
+  id                         String          @id @default(uuid())
+  period                     String          @unique // e.g. "2026-11"
+  status                     String          @default("DRAFT") // "DRAFT" | "LOCKED"
+  isLocked                   Boolean         @default(false)
+  totalStaff                 Int             @default(0)
+  totalConfirmedStaff        Int             @default(0)
+  totalPendingStaff          Int             @default(0)
+  totalCompanyConvertedHours Float           @default(0)
+  totalCompanyPayroll        Float           @default(0)
+  avgCompletionPercent       Float           @default(0)
+  lockedAt                   DateTime?
+  lockedBy                   String?
+  snapshot                   Json?
+  records                    PayrollRecord[]
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
+}
+
+model PayrollRecord {
+  id                    String         @id @default(uuid())
+  periodId              String?
+  periodRef             PayrollPeriod? @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  period                String         // e.g. "2026-11"
+  userId                String
+  user                  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status                String         @default("PENDING") // "PENDING" | "CONFIRMED" | "LOCKED"
+  managementHours       Float          @default(0)
+  projectHours          Float          @default(0)
+  projectConvertedHours Float          @default(0)
+  rdHours               Float          @default(0)
+  rdCappedHours         Float          @default(0)
+  rdExceededHours       Float          @default(0)
+  totalConvertedHours   Float          @default(0)
+  standardHourRate      Float          @default(100000)
+  projectHourRate       Float          @default(180000)
+  projectScaleFactor    Float          @default(1.2)
+  seniorityLevel        String         @default("MIDDLE")
+  seniorityFactor       Float          @default(0.2)
+  managementSalary      Float          @default(0)
+  seniorityAllowance    Float          @default(0)
+  rdSalary              Float          @default(0)
+  projectSalary         Float          @default(0)
+  totalSalary           Float          @default(0)
+  monthlySalaryEstimate Float          @default(0)
+  formulaDescription    String?        @db.Text
+  confirmedAt           DateTime?
+  confirmedBy           String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@unique([userId, period])
+  @@index([period])
 }

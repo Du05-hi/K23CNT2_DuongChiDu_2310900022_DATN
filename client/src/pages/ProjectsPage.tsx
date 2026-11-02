@@ -630,6 +630,22 @@ export const ProjectsPage: React.FC = () => {
                   project.taskCount?.completed ??
                   0;
                 const progress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+                const isAllTasksDone = totalTasks > 0 && completedTasks === totalTasks;
+                const isProjectCompleted = project.status === 'COMPLETED' || isAllTasksDone;
+
+                // Ngày hoàn thành thực tế của task cuối cùng (max completedAt)
+                let lastCompletedAt: string | Date | null = project.lastCompletedAt || project.taskCount?.lastCompletedAt || null;
+                if (!lastCompletedAt && project.tasks && project.tasks.length > 0) {
+                  const doneTasks = project.tasks.filter((t) => t.status === 'DONE');
+                  if (doneTasks.length > 0) {
+                    const timestamps = doneTasks
+                      .map((t) => (t.completedAt ? new Date(t.completedAt).getTime() : (t as any).updatedAt ? new Date((t as any).updatedAt).getTime() : NaN))
+                      .filter((t) => !isNaN(t));
+                    if (timestamps.length > 0) {
+                      lastCompletedAt = new Date(Math.max(...timestamps));
+                    }
+                  }
+                }
                 const daysLeft = getRemainingDays(project.endDate);
 
                 return (
@@ -717,7 +733,11 @@ export const ProjectsPage: React.FC = () => {
 
                       {project.endDate && (
                         <div className="mb-4">
-                          <CountdownBadge dueDate={project.endDate} isDone={project.status === 'COMPLETED'} />
+                          <CountdownBadge
+                            dueDate={project.endDate}
+                            isCompleted={isProjectCompleted}
+                            completedAt={lastCompletedAt}
+                          />
                         </div>
                       )}
                     </div>
@@ -780,6 +800,21 @@ export const ProjectsPage: React.FC = () => {
                         project.taskCount?.completed ??
                         0;
                       const progress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+                      const isAllTasksDone = totalTasks > 0 && completedTasks === totalTasks;
+                      const isProjectCompleted = project.status === 'COMPLETED' || isAllTasksDone;
+
+                      let lastCompletedAt: string | Date | null = project.lastCompletedAt || project.taskCount?.lastCompletedAt || null;
+                      if (!lastCompletedAt && project.tasks && project.tasks.length > 0) {
+                        const doneTasks = project.tasks.filter((t) => t.status === 'DONE');
+                        if (doneTasks.length > 0) {
+                          const timestamps = doneTasks
+                            .map((t) => (t.completedAt ? new Date(t.completedAt).getTime() : (t as any).updatedAt ? new Date((t as any).updatedAt).getTime() : NaN))
+                            .filter((t) => !isNaN(t));
+                          if (timestamps.length > 0) {
+                            lastCompletedAt = new Date(Math.max(...timestamps));
+                          }
+                        }
+                      }
                       const daysLeft = getRemainingDays(project.endDate);
 
                       return (
@@ -824,7 +859,11 @@ export const ProjectsPage: React.FC = () => {
                                 {project.endDate ? formatDateTime(project.endDate) : '—'}
                               </span>
                               {project.endDate && (
-                                <CountdownBadge dueDate={project.endDate} isDone={project.status === 'COMPLETED'} />
+                                <CountdownBadge
+                                  dueDate={project.endDate}
+                                  isCompleted={isProjectCompleted}
+                                  completedAt={lastCompletedAt}
+                                />
                               )}
                             </div>
                           </td>

@@ -60,6 +60,10 @@ apiClient.interceptors.response.use(
       'success' in body &&
       'data' in body
     ) {
+      // Giữ nguyên object chứa metadata như isLocked, summary, steps, period
+      if ('isLocked' in body || 'summary' in body || 'steps' in body || 'allTasks' in body) {
+        return response;
+      }
       response.data = body.data;
     }
     return response;
