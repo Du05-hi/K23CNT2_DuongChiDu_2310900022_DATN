@@ -45,9 +45,23 @@ export const userSocketMap = new Map<string, string>();
 export const configureSocket = (httpServer: HttpServer): Server => {
   const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
 
+  const allowedOrigins = [
+    clientUrl,
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+  ];
+
   const io = new Server(httpServer, {
     cors: {
-      origin: clientUrl,
+      origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin)) {
+          callback(null, true);
+        } else {
+          callback(null, true);
+        }
+      },
       methods: ['GET', 'POST'],
       credentials: true,
     },

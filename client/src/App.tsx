@@ -12,6 +12,7 @@ import MyWorkPage from './pages/MyWorkPage';
 import ProjectsPage from './pages/ProjectsPage';
 import KanbanPage from './pages/KanbanPage';
 import KpiPage from './pages/KpiPage';
+import ApprovalsPage from './pages/ApprovalsPage';
 import AIAssistantPage from './pages/AIAssistantPage';
 import CalendarPage from './pages/CalendarPage';
 import AdminPage from './pages/AdminPage';
@@ -54,6 +55,7 @@ export const App: React.FC = () => {
           <Route path="/projects/:id/kanban" element={<KanbanPage />} />
           <Route path="/calendar" element={<CalendarPage />} />
           <Route path="/kpi" element={<KpiPage />} />
+          <Route path="/approvals" element={<ApprovalsPage />} />
           <Route path="/ai-assistant" element={<AIAssistantPage />} />
           <Route path="/profile" element={<ProfilePage />} />
 

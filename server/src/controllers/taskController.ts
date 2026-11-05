@@ -1,3 +1,4 @@
+import { syncProjectStatus } from '../utils/projectStatusSync';
 import fs from 'fs';
 import path from 'path';
 import { NextFunction, Response } from 'express';
@@ -1117,6 +1118,19 @@ export const updateTaskStatus = async (req: AuthenticatedRequest, res: Response)
         res.status(400).json({
           success: false,
           message: `Không thể chuyển trạng thái. Công việc đang bị khóa bởi task tiền đề: ${blocking.title} (#${blocking.id.slice(0, 8)})`,
+        });
+        return;
+      }
+    }
+
+    // 1.1 Reviewer Verification Rule: Nếu task có người thẩm định (Reviewer) riêng, chỉ Reviewer hoặc Quản lý dự án mới có quyền nghiệm thu sang DONE
+    if (status === 'DONE' && currentTask.status !== 'DONE' && currentTask.reviewerId) {
+      const isManager = await canManageProject(req.user, currentTask.projectId);
+      const isReviewer = currentTask.reviewerId === req.user.id;
+      if (!isManager && !isReviewer) {
+        res.status(403).json({
+          success: false,
+          message: 'Công việc này yêu cầu người thẩm định (Reviewer) hoặc Quản lý dự án nghiệm thu hoàn thành. Vui lòng chuyển sang trạng thái "Đang duyệt" (REVIEW).',
         });
         return;
       }

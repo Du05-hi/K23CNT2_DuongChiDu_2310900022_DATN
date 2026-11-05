@@ -23,7 +23,7 @@ import { authenticateToken, authorizeRoles } from '../middlewares/authMiddleware
 
 const router = express.Router();
 
-// Yêu cầu xác thực tài khoản
+// Yêu cầu xác thực tài khoản cho toàn bộ phân hệ KPI
 router.use(authenticateToken);
 
 // Danh sách điểm KPI đầy đủ toàn bộ nhân sự (GET /api/kpi & GET /api/kpi/report)
@@ -66,20 +66,20 @@ router.get('/enterprise-payroll', getEnterprisePayroll);
 // Mô phỏng tính lương thực tế với tham số tùy chỉnh
 router.post('/enterprise-payroll/calculate', calculateEnterprisePayrollSimulation);
 
-// Xác nhận và chốt lương cho từng nhân sự
-router.post('/enterprise-payroll/confirm', confirmEnterprisePayroll);
+// Xác nhận và chốt lương cho từng nhân sự (Chỉ ADMIN & MANAGER)
+router.post('/enterprise-payroll/confirm', authorizeRoles('ADMIN', 'MANAGER'), confirmEnterprisePayroll);
 
-// Xác nhận và chốt lương hàng loạt toàn công ty
-router.post('/enterprise-payroll/confirm-all', confirmAllEnterprisePayroll);
-router.post('/enterprise-payroll/lock-period', lockPayrollPeriod);
-router.post('/payroll/lock-period', lockPayrollPeriod);
+// Xác nhận và chốt lương hàng loạt / khóa kỳ toàn công ty (Chỉ ADMIN & MANAGER)
+router.post('/enterprise-payroll/confirm-all', authorizeRoles('ADMIN', 'MANAGER'), confirmAllEnterprisePayroll);
+router.post('/enterprise-payroll/lock-period', authorizeRoles('ADMIN', 'MANAGER'), lockPayrollPeriod);
+router.post('/payroll/lock-period', authorizeRoles('ADMIN', 'MANAGER'), lockPayrollPeriod);
 router.post('/enterprise-payroll/unlock-period', authorizeRoles('ADMIN', 'MANAGER'), unlockPayrollPeriod);
 router.post('/payroll/unlock-period', authorizeRoles('ADMIN', 'MANAGER'), unlockPayrollPeriod);
 
 // Lấy trạng thái quy trình phê duyệt 7 bước
 router.get('/enterprise-workflow', getEnterpriseWorkflow);
 
-// Cập nhật trạng thái từng bước phê duyệt
+// Cập nhật trạng thái từng bước phê duyệt (Chỉ ADMIN & MANAGER)
 router.post('/enterprise-workflow/step', authorizeRoles('ADMIN', 'MANAGER'), updateEnterpriseWorkflowStep);
 
 export default router;

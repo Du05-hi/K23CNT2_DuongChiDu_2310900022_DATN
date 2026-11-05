@@ -10,6 +10,11 @@ import {
   getProjectStats,
 } from '../controllers/projectController';
 import { getProjectMilestones, createProjectMilestone } from '../controllers/taskController';
+import {
+  getProjectWorkload,
+  getAiRebalanceRecommendations,
+  applyWorkloadRebalance,
+} from '../controllers/workloadController';
 import { authenticateToken, authorizeRoles } from '../middlewares/authMiddleware';
 
 const router = express.Router();
@@ -36,5 +41,10 @@ router.post('/:id/milestones', authorizeRoles('ADMIN', 'MANAGER'), createProject
 // 5. Quản lý thành viên tham gia dự án
 router.post('/:id/members', authorizeRoles('ADMIN', 'MANAGER'), addMember);
 router.delete('/:id/members/:userId', authorizeRoles('ADMIN', 'MANAGER'), removeMember);
+
+// 6. Cân bằng tải nhân sự & AI Rebalancing
+router.get('/:id/workload', getProjectWorkload);
+router.post('/:id/workload/ai-rebalance', getAiRebalanceRecommendations);
+router.post('/:id/workload/apply-rebalance', applyWorkloadRebalance);
 
 export default router;

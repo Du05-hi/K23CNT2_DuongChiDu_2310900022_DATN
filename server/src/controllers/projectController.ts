@@ -1,3 +1,4 @@
+import { syncProjectStatus } from '../utils/projectStatusSync';
 import { Response } from 'express';
 import { prisma } from '../config/prisma';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
@@ -269,7 +270,24 @@ export const getAllProjects = async (req: AuthenticatedRequest, res: Response): 
       const todo = tasks.filter((task) => task.status === 'TODO').length;
       const review = tasks.filter((task) => task.status === 'REVIEW').length;
       const progress = total > 0 ? Math.round((completed / total) * 100) : 0;
-      const isCompleted = project.status === 'COMPLETED' || (total > 0 && completed === total);
+      let effectiveStatus: any = project.status;
+      if (total > 0 && completed === total) {
+        effectiveStatus = 'COMPLETED';
+        if (project.status !== 'COMPLETED') {
+          prisma.project.update({
+            where: { id: project.id },
+            data: { status: 'COMPLETED' },
+          }).catch((err) => console.warn('Lỗi auto-sync project status COMPLETED:', err));
+        }
+      } else if ((completed > 0 || inProgress > 0 || review > 0) && project.status === 'PLANNING') {
+        effectiveStatus = 'IN_PROGRESS';
+        prisma.project.update({
+          where: { id: project.id },
+          data: { status: 'IN_PROGRESS' },
+        }).catch((err) => console.warn('Lỗi auto-sync project status IN_PROGRESS:', err));
+      }
+
+      const isCompleted = effectiveStatus === 'COMPLETED' || (total > 0 && completed === total);
 
       // Tìm ngày hoàn thành của task cuối cùng (max(completedAt))
       const completedTasks = tasks.filter((t) => t.status === 'DONE');
@@ -285,6 +303,7 @@ export const getAllProjects = async (req: AuthenticatedRequest, res: Response): 
 
       return {
         ...project,
+        status: effectiveStatus,
         lastCompletedAt,
         isCompleted,
         taskCount: {
@@ -730,6 +749,12 @@ export const getProjectStats = async (req: AuthenticatedRequest, res: Response):
     const totalActual = tasks.reduce((sum, t) => sum + (t.actualHours || 0), 0);
 
     const progressPercentage = total > 0 ? Math.round((done / total) * 100) : 0;
+    if (total > 0 && done === total) {
+      prisma.project.update({
+        where: { id: projectId },
+        data: { status: 'COMPLETED' },
+      }).catch(() => {});
+    }
 
     res.status(200).json({
       success: true,

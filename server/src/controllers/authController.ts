@@ -552,16 +552,18 @@ export const getMe = async (req: AuthenticatedRequest, res: Response): Promise<v
 export const updateProfile = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user?.id;
-    const { name, avatar } = req.body;
+    const { name, avatar, phone, jobTitle } = req.body;
 
     if (!userId) {
-      res.status(401).json({ success: false, message: 'Chưa xác thực.' });
+      res.status(401).json({ success: false, message: 'Chua x�c th?c.' });
       return;
     }
 
     const updateData: any = {};
     if (name !== undefined) updateData.name = name.trim();
     if (avatar !== undefined) updateData.avatar = avatar;
+    if (phone !== undefined) updateData.phone = phone ? String(phone).trim() : null;
+    if (jobTitle !== undefined) updateData.jobTitle = jobTitle ? String(jobTitle).trim() : null;
 
     const updatedUser = await prisma.user.update({
       where: { id: userId },
@@ -571,12 +573,16 @@ export const updateProfile = async (req: AuthenticatedRequest, res: Response): P
         email: true,
         name: true,
         avatar: true,
+        phone: true,
+        jobTitle: true,
         role: true,
         departmentId: true,
+        department: {
+          select: { id: true, name: true },
+        },
         updatedAt: true,
       },
     });
-
     res.status(200).json({
       success: true,
       message: 'Cập nhật thông tin cá nhân thành công!',

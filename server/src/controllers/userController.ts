@@ -49,6 +49,8 @@ export const getAllUsers = async (req: AuthenticatedRequest, res: Response): Pro
           role: true,
           isActive: true,
           avatar: true,
+          phone: true,
+          jobTitle: true,
           departmentId: true,
           department: {
             select: { id: true, name: true },
@@ -93,6 +95,8 @@ export const getUserById = async (req: AuthenticatedRequest, res: Response): Pro
         role: true,
         isActive: true,
         avatar: true,
+        phone: true,
+        jobTitle: true,
         departmentId: true,
         department: true,
         createdAt: true,
@@ -758,19 +762,42 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       totalUsers,
       activeUsers,
       totalDepartments,
-      projectsByStatus,
-      tasksByStatus,
+      allProjects,
+      validTasks,
     ] = await Promise.all([
       prisma.user.count(),
       prisma.user.count({ where: { isActive: true } }),
       prisma.department.count(),
-      prisma.project.groupBy({
-        by: ['status'],
-        _count: { status: true },
+      prisma.project.findMany({
+        where: {
+          NOT: {
+            name: 'Công việc cá nhân & Lịch hẹn',
+          },
+        },
+        select: {
+          id: true,
+          status: true,
+          tasks: {
+            select: {
+              id: true,
+              status: true,
+              parentId: true,
+            },
+          },
+        },
       }),
-      prisma.task.groupBy({
-        by: ['status'],
-        _count: { status: true },
+      // Lấy toàn bộ task hợp lệ trong hệ thống (loại bỏ orphan tasks)
+      prisma.task.findMany({
+        where: {
+          project: {
+            id: { not: '' },
+          },
+        },
+        select: {
+          id: true,
+          status: true,
+          parentId: true,
+        },
       }),
     ]);
 
@@ -779,34 +806,88 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       IN_PROGRESS: 0,
       COMPLETED: 0,
       ARCHIVED: 0,
-      total: 0,
+      total: allProjects.length,
     };
 
-    projectsByStatus.forEach((item) => {
-      if (item.status in projectCounts) {
-        (projectCounts as any)[item.status] = item._count.status;
+    // Chuẩn hóa và đếm dự án theo thực tế công việc
+    for (const proj of allProjects) {
+      if (proj.status === 'ARCHIVED') {
+        projectCounts.ARCHIVED++;
+        continue;
       }
-      projectCounts.total += item._count.status;
-    });
 
+      const totalTasks = proj.tasks.length;
+      const completedTasks = proj.tasks.filter((t) => t.status === 'DONE').length;
+      const inProgressTasks = proj.tasks.filter((t) => t.status === 'IN_PROGRESS' || t.status === 'REVIEW').length;
+
+      if (proj.status === 'COMPLETED' || (totalTasks > 0 && completedTasks === totalTasks)) {
+        projectCounts.COMPLETED++;
+        // Tự động đồng bộ vào database nếu chưa là COMPLETED
+        if (proj.status !== 'COMPLETED') {
+          prisma.project.update({
+            where: { id: proj.id },
+            data: { status: 'COMPLETED' },
+          }).catch((err) => console.warn('Lỗi auto-sync project status COMPLETED:', err));
+        }
+      } else if (proj.status === 'IN_PROGRESS' || completedTasks > 0 || inProgressTasks > 0) {
+        projectCounts.IN_PROGRESS++;
+        if (proj.status === 'PLANNING') {
+          prisma.project.update({
+            where: { id: proj.id },
+            data: { status: 'IN_PROGRESS' },
+          }).catch((err) => console.warn('Lỗi auto-sync project status IN_PROGRESS:', err));
+        }
+      } else {
+        projectCounts.PLANNING++;
+      }
+    }
+
+    // Bóc tách chi tiết phân cấp Tasks (Root Tasks vs SubTasks WBS)
     const taskCounts = {
       TODO: 0,
       IN_PROGRESS: 0,
       REVIEW: 0,
       DONE: 0,
-      total: 0,
+      total: validTasks.length,
+      totalRootTasks: 0,
+      completedRootTasks: 0,
+      totalSubTasks: 0,
+      completedSubTasks: 0,
+      totalAllTasks: validTasks.length,
+      completedAllTasks: 0,
+      completionRate: 0,
+      rootCompletionRate: 0,
     };
 
-    tasksByStatus.forEach((item) => {
-      if (item.status in taskCounts) {
-        (taskCounts as any)[item.status] = item._count.status;
+    for (const task of validTasks) {
+      if (task.status in taskCounts) {
+        (taskCounts as any)[task.status]++;
       }
-      taskCounts.total += item._count.status;
-    });
+      if (task.status === 'DONE') {
+        taskCounts.completedAllTasks++;
+      }
 
-    const completionRate =
-      taskCounts.total > 0
-        ? Math.round((taskCounts.DONE / taskCounts.total) * 100)
+      if (task.parentId) {
+        taskCounts.totalSubTasks++;
+        if (task.status === 'DONE') {
+          taskCounts.completedSubTasks++;
+        }
+      } else {
+        taskCounts.totalRootTasks++;
+        if (task.status === 'DONE') {
+          taskCounts.completedRootTasks++;
+        }
+      }
+    }
+
+    taskCounts.completionRate =
+      taskCounts.totalAllTasks > 0
+        ? Math.round((taskCounts.completedAllTasks / taskCounts.totalAllTasks) * 100)
+        : 0;
+
+    taskCounts.rootCompletionRate =
+      taskCounts.totalRootTasks > 0
+        ? Math.round((taskCounts.completedRootTasks / taskCounts.totalRootTasks) * 100)
         : 0;
 
     res.status(200).json({
@@ -821,10 +902,7 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
           total: totalDepartments,
         },
         projects: projectCounts,
-        tasks: {
-          ...taskCounts,
-          completionRate,
-        },
+        tasks: taskCounts,
       },
     });
   } catch (error: any) {
@@ -901,6 +979,8 @@ export const createUser = async (req: AuthenticatedRequest, res: Response): Prom
         role: true,
         isActive: true,
         avatar: true,
+        phone: true,
+        jobTitle: true,
         departmentId: true,
         department: {
           select: { id: true, name: true },
@@ -976,6 +1056,8 @@ export const updateUserDepartment = async (req: AuthenticatedRequest, res: Respo
         role: true,
         isActive: true,
         avatar: true,
+        phone: true,
+        jobTitle: true,
         departmentId: true,
         department: {
           select: { id: true, name: true },

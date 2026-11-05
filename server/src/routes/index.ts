@@ -9,6 +9,8 @@ import notificationRoutes from './notificationRoutes';
 import userRoutes from './userRoutes';
 import activityRoutes from './activityRoutes';
 import calendarRoutes from './calendarRoutes';
+import approvalRoutes from './approvalRoutes';
+import settingRoutes from './settingRoutes';
 
 const router = express.Router();
 
@@ -22,5 +24,7 @@ router.use('/notifications', notificationRoutes);
 router.use('/users', userRoutes);
 router.use('/activity', activityRoutes);
 router.use('/calendar', calendarRoutes);
+router.use('/approvals', approvalRoutes);
+router.use('/settings', settingRoutes);
 
 export default router;

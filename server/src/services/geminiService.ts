@@ -1,11 +1,18 @@
 import { GoogleGenerativeAI, GenerationConfig } from '@google/generative-ai';
 
-const AVAILABLE_MODELS = ['gemini-1.5-flash', 'gemini-2.0-flash'] as const;
+const AVAILABLE_MODELS = [
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-3.8-flash',
+  'gemini-flash-latest',
+  'gemini-1.5-flash',
+  'gemini-2.0-flash',
+] as const;
 
 const getGeminiApiKey = (): string => process.env.GEMINI_API_KEY?.trim() || '';
 
 const getModelForRequest = (
-  preferredModel: string = 'gemini-1.5-flash',
+  preferredModel: string = 'gemini-3.5-flash',
   generationConfig?: GenerationConfig
 ) => {
   const apiKey = getGeminiApiKey();
@@ -13,15 +20,68 @@ const getModelForRequest = (
     throw new Error('GEMINI_API_KEY chưa được cấu hình trong môi trường hệ thống.');
   }
 
-  const modelName = AVAILABLE_MODELS.includes(preferredModel as (typeof AVAILABLE_MODELS)[number])
-    ? preferredModel
-    : 'gemini-1.5-flash';
+  let modelName = preferredModel;
+  // Tự động nâng cấp các model đã bị Google deprecated (1.5, 2.0, 2.5) sang 3.5-flash
+  if (!modelName || modelName.includes('1.5') || modelName.includes('2.0') || modelName.includes('2.5')) {
+    modelName = 'gemini-3.5-flash';
+  }
 
   return new GoogleGenerativeAI(apiKey).getGenerativeModel({
     model: modelName,
     ...(generationConfig ? { generationConfig } : {}),
   });
 };
+
+/**
+ * Gọi Gemini với cơ chế tự động chuyển đổi mô hình dự phòng (Failover / Retry)
+ * Giúp hệ thống không bao giờ bị gián đoạn khi một model quá tải (503) hoặc thay đổi phiên bản (404)
+ */
+export async function generateContentWithFallback(
+  prompt: string | any,
+  options?: {
+    generationConfig?: GenerationConfig;
+    preferredModel?: string;
+  }
+): Promise<{ text: string; modelUsed: string }> {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY chưa được cấu hình trong môi trường hệ thống.');
+  }
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const preferred =
+    options?.preferredModel && !options.preferredModel.includes('1.5') && !options.preferredModel.includes('2.0')
+      ? options.preferredModel
+      : 'gemini-3.5-flash';
+
+  const modelsToTry = [
+    preferred,
+    'gemini-3.5-flash-lite',
+    'gemini-3.8-flash',
+    'gemini-flash-latest',
+  ];
+  const uniqueModels = Array.from(new Set(modelsToTry));
+
+  let lastError: any = null;
+  for (const m of uniqueModels) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: m,
+        ...(options?.generationConfig ? { generationConfig: options.generationConfig } : {}),
+      });
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      if (text && text.trim()) {
+        return { text: text.trim(), modelUsed: m };
+      }
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[Gemini] Model ${m} gặp sự cố (${err?.message?.slice(0, 80)}), đang thử model dự phòng...`);
+    }
+  }
+
+  throw lastError || new Error('Không thể kết nối đến các mô hình Gemini.');
+}
 
 const normalizeString = (value: string | null | undefined, fallback: string): string => {
   const trimmed = typeof value === 'string' ? value.trim() : '';
@@ -709,6 +769,12 @@ export interface LiveDataContext {
     projectId: string;
     projectName: string;
   }>;
+  currentTime?: {
+    formattedTime: string;
+    formattedDate: string;
+    fullDateTimeStr: string;
+    iso: string;
+  };
 }
 
 /**
@@ -718,7 +784,88 @@ export interface LiveDataContext {
 export function generateSmartFallbackResponse(query: string, context: LiveDataContext): string {
   const q = (query || '').toLowerCase().trim();
 
-  // 1. Ý định: Task quá hạn / trễ hạn
+  const now = new Date();
+  const formattedTime =
+    context.currentTime?.formattedTime ||
+    now.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const formattedDate =
+    context.currentTime?.formattedDate ||
+    now.toLocaleDateString('vi-VN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const fullDateTimeStr = context.currentTime?.fullDateTimeStr || `${formattedTime} - ${formattedDate}`;
+
+  // 1. Ý định: Hỏi giờ giấc / ngày tháng / thời gian thực
+  if (
+    q.includes('mấy giờ') ||
+    q.includes('bây giờ là') ||
+    q.includes('thời gian') ||
+    q.includes('hôm nay là thứ mấy') ||
+    q.includes('hôm nay ngày') ||
+    q.includes('ngày mấy') ||
+    q.includes('thứ mấy') ||
+    q.includes('mấy ngày') ||
+    q.includes('năm nay')
+  ) {
+    return `🕒 Hiện tại là **${formattedTime}**, ${formattedDate} (Múi giờ Việt Nam GMT+7).`;
+  }
+
+  // 2. Ý định: Chào hỏi / Xã giao / Giới thiệu bản thân
+  if (
+    q === 'chào' ||
+    q === 'chào bạn' ||
+    q === 'xin chào' ||
+    q === 'hello' ||
+    q === 'hi' ||
+    q.startsWith('chào ') ||
+    q.startsWith('xin chào') ||
+    q.includes('bạn là ai') ||
+    q.includes('ai assistant') ||
+    q.includes('copilot') ||
+    q.includes('giới thiệu')
+  ) {
+    return (
+      `👋 Chào bạn **${context.user.name}**! Tôi là **TaskFlow AI Copilot** – Trợ lý trí tuệ nhân tạo toàn năng trong hệ thống quản trị dự án & công việc.\n\n` +
+      `✨ **Tôi có thể hỗ trợ bạn:**\n` +
+      `• **Tra cứu dữ liệu hệ thống:** Xem việc quá hạn, việc cần làm (TODO), việc khẩn cấp (URGENT), báo cáo tiến độ các dự án, hoặc các task được giao cho bạn.\n` +
+      `• **Hỗ trợ công việc & Lập trình:** Giải đáp kiến thức (TypeScript, React, Node.js, Database...), tư vấn quản trị dự án Agile/Scrum/Kanban.\n` +
+      `• **Soạn thảo văn bản:** Viết email xin nghỉ phép, email báo cáo tiến độ, thông báo nội bộ.\n` +
+      `• **Thời gian thực:** Tra cứu ngày giờ hiện tại.\n\n` +
+      `Bạn cần tôi hỗ trợ nội dung gì hôm nay?`
+    );
+  }
+
+  // 3. Ý định: Soạn thảo email xin nghỉ phép
+  if (
+    (q.includes('nghỉ phép') || q.includes('xin nghỉ')) &&
+    (q.includes('email') || q.includes('viết') || q.includes('soạn') || q.includes('mẫu') || q.includes('đơn'))
+  ) {
+    return (
+      `Dưới đây là mẫu **Email xin nghỉ phép chuyên nghiệp** dành cho bạn:\n\n` +
+      `---\n\n` +
+      `**Tiêu đề:** [Đơn xin nghỉ phép] - ${context.user.name} - [Phòng ban / Dự án] - [Từ ngày DD/MM đến DD/MM]\n\n` +
+      `**Kính gửi:** Quản lý dự án / Trưởng bộ phận và Bộ phận Nhân sự (HR),\n\n` +
+      `Tôi tên là: **${context.user.name}** (${context.user.email})\n` +
+      `Hiện đang đảm nhiệm vị trí thành viên trong các dự án của công ty.\n\n` +
+      `Tôi viết email này để xin phép được nghỉ phép trong khoảng thời gian từ ngày **[DD/MM/YYYY]** đến hết ngày **[DD/MM/YYYY]** (tổng cộng [Số] ngày) vì lý do cá nhân.\n\n` +
+      `**Về tiến độ bàn giao công việc:**\n` +
+      `- Các công việc quan trọng trong giai đoạn này tôi đã hoàn tất hoặc sắp xếp bàn giao lại cho đồng nghiệp **[Tên đồng nghiệp]** tạm thời hỗ trợ theo dõi.\n` +
+      `- Tôi vẫn sẽ kiểm tra email hoặc tin nhắn định kỳ khi có các tình huống khẩn cấp cần giải quyết.\n\n` +
+      `Rất mong nhận được sự chấp thuận từ Ban Quản lý.\n\n` +
+      `Trân trọng cảm ơn,\n` +
+      `**${context.user.name}**`
+    );
+  }
+
+  // 4. Ý định: Giải thích công nghệ / Lập trình cơ bản khi offline
+  if (q.includes('typescript là gì') || q.includes('typescript')) {
+    return (
+      `📘 **TypeScript** là ngôn ngữ lập trình mã nguồn mở được phát triển bởi Microsoft, là một "superset" (siêu tập con mở rộng) của JavaScript.\n\n` +
+      `• **Đặc điểm chính:** Bổ sung hệ thống kiểm tra kiểu dữ liệu tĩnh (static typing), interfaces, generics và tooling mạnh mẽ.\n` +
+      `• **Lợi ích:** Bắt lỗi ngay lúc code (compile-time), tự động gợi ý code (IntelliSense) chuẩn xác, giúp phát triển các hệ thống lớn an toàn và dễ bảo trì.\n` +
+      `• **Thực thi:** Mã nguồn TypeScript sau đó được biên dịch (transpile) thành JavaScript thuần để chạy trên Node.js hoặc trình duyệt.`
+    );
+  }
+
+  // 5. Ý định: Task quá hạn / trễ hạn
   if (q.includes('quá hạn') || q.includes('trễ hạn') || q.includes('overdue') || q.includes('muộn deadline')) {
     const overdueTasks = context.tasks.filter((t) => t.isOverdue);
     if (overdueTasks.length === 0) {
@@ -733,7 +880,7 @@ export function generateSmartFallbackResponse(query: string, context: LiveDataCo
     return `⚠️ **Phát hiện ${overdueTasks.length} công việc đã quá hạn cần xử lý gấp:**\n\n${taskLines.join('\n\n')}\n\n👉 *Khuyến nghị: Bạn có thể bấm vào từng task ở trên để xem chi tiết hoặc đôn đốc người phụ trách.*`;
   }
 
-  // 2. Ý định: Việc cần làm (TODO)
+  // 6. Ý định: Việc cần làm (TODO)
   if (q.includes('cần làm') || q.includes('to do') || q.includes('todo') || q.includes('chưa làm') || q.includes('chưa thực hiện')) {
     const todoTasks = context.tasks.filter((t) => t.status === 'TODO');
     if (todoTasks.length === 0) {
@@ -751,7 +898,7 @@ export function generateSmartFallbackResponse(query: string, context: LiveDataCo
     return `📋 **Danh sách ${todoTasks.length} công việc đang chờ thực hiện (TODO):**\n\n${taskLines.join('\n\n')}${moreText}\n\n👉 *Bạn có thể bấm vào thẻ công việc để mở modal chi tiết hoặc chuyển trạng thái sang In Progress.*`;
   }
 
-  // 3. Ý định: Việc khẩn cấp (URGENT / HIGH)
+  // 7. Ý định: Việc khẩn cấp (URGENT / HIGH)
   if (q.includes('khẩn cấp') || q.includes('urgent') || q.includes('ưu tiên cao') || q.includes('cấp bách')) {
     const urgentTasks = context.tasks.filter((t) => t.priority === 'URGENT' || t.priority === 'HIGH');
     if (urgentTasks.length === 0) {
@@ -766,23 +913,25 @@ export function generateSmartFallbackResponse(query: string, context: LiveDataCo
     return `🔥 **Danh sách ${urgentTasks.length} công việc Khẩn cấp & Ưu tiên cao:**\n\n${taskLines.join('\n\n')}\n\n👉 *Khuyến nghị ban quản lý và thành viên tập trung hoàn thành dứt điểm các đầu việc này trước.*`;
   }
 
-  // 4. Ý định: Tiến độ dự án / Báo cáo tổng quan
+  // 8. Ý định: Tiến độ dự án / Báo cáo tổng quan
   if (q.includes('tiến độ') || q.includes('báo cáo') || q.includes('tổng quan') || q.includes('tỷ lệ') || q.includes('thống kê')) {
     const projectLines = context.projects.map((p) => {
       return `• **${p.name}**: Đạt **${p.progress}%** (${p.completedCount}/${p.taskCount} tasks hoàn thành - Trạng thái: *${p.status}*)`;
     });
 
-    return `📊 **Báo cáo tiến độ tổng quan thời gian thực:**\n\n` +
+    return (
+      `📊 **Báo cáo tiến độ tổng quan thời gian thực:**\n\n` +
       `- **Tổng số dự án:** ${context.stats.totalProjects} dự án\n` +
       `- **Tổng số công việc:** ${context.stats.totalTasks} tasks\n` +
       `- **Tỷ lệ hoàn thành toàn hệ thống:** **${context.stats.completionRate}%** (${context.stats.completedTasks}/${context.stats.totalTasks} tasks Done)\n` +
       `- **Đang thực hiện:** ${context.stats.inProgressTasks} | **Chờ kiểm thử:** ${context.stats.reviewTasks} | **Cần làm:** ${context.stats.todoTasks}\n` +
       `- **Công việc quá hạn:** **${context.stats.overdueTasks}** tasks\n\n` +
       `**Chi tiết tiến độ từng dự án:**\n${projectLines.join('\n')}\n\n` +
-      `👉 *Bạn có thể truy cập phân hệ Bảng Kanban của từng dự án để xem luồng công việc trực quan.*`;
+      `👉 *Bạn có thể truy cập phân hệ Bảng Kanban của từng dự án để xem luồng công việc trực quan.*`
+    );
   }
 
-  // 5. Ý định: Việc của tôi
+  // 9. Ý định: Việc của tôi
   if (q.includes('của tôi') || q.includes('giao cho tôi') || q.includes('phụ trách của tôi') || q.includes('nhiệm vụ của tôi')) {
     const myTasks = context.tasks.filter((t) => t.assigneeId === context.user.id);
     if (myTasks.length === 0) {
@@ -798,7 +947,7 @@ export function generateSmartFallbackResponse(query: string, context: LiveDataCo
     return `👤 Chào **${context.user.name}**, bạn đang phụ trách **${myTasks.length} công việc**:\n\n${taskLines.join('\n\n')}\n\n👉 *Bấm vào bất kỳ thẻ công việc nào để mở chi tiết cập nhật tiến độ!*`;
   }
 
-  // 6. Tìm kiếm theo từ khóa tổng quát
+  // 10. Tìm kiếm theo từ khóa trong tasks
   const matched = context.tasks.filter((t) => {
     return (
       t.title.toLowerCase().includes(q) ||
@@ -819,17 +968,21 @@ export function generateSmartFallbackResponse(query: string, context: LiveDataCo
     return `Dựa trên dữ liệu thời gian thực của hệ thống, tôi tìm thấy **${matched.length} công việc** phù hợp:\n\n${taskLines.join('\n\n')}${more}`;
   }
 
-  // Phản hồi mặc định khi không tìm thấy kết quả khớp
-  return `Tôi đã đối chiếu dữ liệu live từ hệ thống gồm **${context.stats.totalTasks} công việc** thuộc **${context.stats.totalProjects} dự án**, nhưng chưa tìm thấy dữ liệu khớp chính xác với yêu cầu: *"${query}"*.\n\n` +
-    `💡 **Gợi ý bạn có thể hỏi tôi:**\n` +
-    `• *"Tìm các công việc đang quá hạn"* (hoặc click chip **⚠️ Việc quá hạn**)\n` +
-    `• *"Danh sách việc cần làm"* (hoặc click chip **📋 Việc cần làm (TODO)**)\n` +
-    `• *"Những việc khẩn cấp"* (hoặc click chip **🔥 Việc khẩn cấp (URGENT)**)\n` +
-    `• *"Báo cáo tiến độ các dự án"* hoặc tìm theo tên người phụ trách!`;
+  // Phản hồi thân thiện, đa năng thay vì câu fallback cứng nhắc
+  return (
+    `Tôi là **TaskFlow AI Copilot** – Trợ lý thông minh đồng hành cùng bạn.\n\n` +
+    `Tôi có thể hỗ trợ bạn cả về kiến thức tổng quát, lập trình, soạn thảo văn bản lẫn tra cứu trực tiếp dữ liệu dự án.\n\n` +
+    `💡 **Một số câu hỏi bạn có thể thử:**\n` +
+    `• *"Bây giờ là mấy giờ?"* hoặc *"Hôm nay là thứ mấy?"*\n` +
+    `• *"TypeScript là gì và tại sao nên dùng?"*\n` +
+    `• *"Viết giúp tôi email xin nghỉ phép"* hoặc *"Soạn email báo cáo tiến độ"*\n` +
+    `• *"Tìm các công việc đang quá hạn"* hoặc *"Danh sách việc cần làm của tôi"*\n` +
+    `• *"Báo cáo tiến độ các dự án thời gian thực"*`
+  );
 }
 
 /**
- * 6. Trò chuyện và phân tích dữ liệu dự án thời gian thực qua Gemini AI (Live Data-Aware Chat)
+ * 6. Trò chuyện và phân tích dữ liệu dự án thời gian thực qua Gemini AI (Hybrid Copilot with Live Data)
  */
 export async function askGeminiWithLiveData(
   query: string,
@@ -842,12 +995,34 @@ export async function askGeminiWithLiveData(
     return generateSmartFallbackResponse(query, context);
   }
 
+  const now = new Date();
+  const formattedTime =
+    context.currentTime?.formattedTime ||
+    now.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const formattedDate =
+    context.currentTime?.formattedDate ||
+    now.toLocaleDateString('vi-VN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const fullDateTimeStr = context.currentTime?.fullDateTimeStr || `${formattedTime} - ${formattedDate}`;
+
   try {
     const systemInstruction = `
-Bạn là Trợ lý Dữ liệu Live nội bộ của TaskFlow AI trong hệ thống quản trị dự án & công việc doanh nghiệp.
+Bạn là **TaskFlow AI Copilot** – Trợ lý Trí tuệ Nhân tạo toàn năng thế hệ mới (Hybrid Copilot) trong hệ thống quản trị dự án & công việc doanh nghiệp TaskFlow.
 Người dùng đang trò chuyện: ${context.user.name} (Email: ${context.user.email}, Quyền: ${context.user.role}).
 
-DƯỚI ĐÂY LÀ BỘ DỮ LIỆU THỜI GIAN THỰC (LIVE DATA) ĐƯỢC TRÍCH XUẤT TRỰC TIẾP TỪ DATABASE PRISMA:
+THỜI GIAN THỰC HIỆN TẠI CỦA HỆ THỐNG:
+- Thời gian & Ngày: ${fullDateTimeStr} (Múi giờ Việt Nam GMT+7).
+- Bạn luôn có ý thức chính xác về mốc thời gian thực tế này để trả lời giờ giấc, tính toán hôm nay/ngày mai/thứ mấy và so sánh hạn chót công việc.
+
+VAI TRÒ VÀ NĂNG LỰC KÉP CỦA BẠN (HYBRID COPILOT):
+1. KHẢ NĂNG TRẢ LỜI MỞ RỘNG & GIAO TIẾP TỰ NHIÊN (GENERAL INTELLIGENCE & CONVERSATION):
+   - Bạn là một AI thông minh, hiểu biết sâu rộng và trò chuyện tự nhiên, thân thiện, lịch thiệp bằng tiếng Việt.
+   - Khi người dùng hỏi các câu hỏi đời sống, giao tiếp, thời gian thực (ví dụ: "mấy giờ rồi", "hôm nay là thứ mấy", "chào bạn", "bạn là ai", "thời tiết"): Hãy trả lời vui vẻ, thông minh, chính xác dựa trên thời gian thực.
+   - Khi người dùng hỏi kiến thức chuyên môn, lập trình, công nghệ (ví dụ: "TypeScript là gì", "React useEffect hoạt động thế nào", "RESTful API là gì", "Docker", "Database MySQL/Prisma"...): Hãy giải thích rõ ràng, súc tích, có ví dụ code dễ hiểu.
+   - Khi người dùng nhờ hỗ trợ công việc văn phòng / quản trị dự án (ví dụ: "viết giúp tôi email xin nghỉ phép 2 ngày vì việc gia đình", "soạn email gửi khách hàng thông báo tiến độ", "phương pháp Scrum/Kanban là gì"): Hãy lập tức soạn thảo văn bản hoặc email chuẩn chỉnh, chuyên nghiệp.
+   - TUYỆT ĐỐI KHÔNG giới hạn câu trả lời chỉ trong dữ liệu task của MySQL nếu người dùng đang hỏi kiến thức mở rộng hoặc giao tiếp!
+
+2. KHẢ NĂNG TRA CỨU VÀ PHÂN TÍCH DỮ LIỆU NỘI BỘ (LIVE ENTERPRISE DATA RETRIEVAL):
+   - Dưới đây là bộ dữ liệu thời gian thực được trích xuất trực tiếp từ cơ sở dữ liệu:
 ==================================================
 TỔNG QUAN HỆ THỐNG:
 - Tổng số dự án: ${context.stats.totalProjects}
@@ -868,22 +1043,34 @@ DANH SÁCH CÔNG VIỆC:
 ${JSON.stringify(context.tasks, null, 2)}
 ==================================================
 
-QUY TẮC PHẢN HỒI BẮT BUỘC:
-1. Dựa vào bộ dữ liệu thời gian thực trên để trả lời câu hỏi của người dùng một cách chính xác, ngắn gọn, có cấu trúc bullet point rõ ràng. Tuyệt đối không tự suy đoán thông tin không có trong dữ liệu.
-2. Nếu người dùng hỏi về task quá hạn, hãy liệt kê đúng tên task, deadline, tên người phụ trách và tên dự án.
-3. Nếu người dùng hỏi về tiến độ, hãy trích dẫn đúng tỷ lệ % và số lượng task hoàn thành / tổng số.
-4. ĐẶC BIỆT BẮT BUỘC: Bất cứ khi nào nhắc đến một công việc cụ thể, bạn PHẢI bọc trong cú pháp [TASK: <taskId> | <taskTitle>] (ví dụ: [TASK: 12345 | Thiết kế trang chủ]). Giao diện Frontend sẽ tự động chuyển cú pháp này thành một thẻ Badge tương tác để người dùng click mở modal chi tiết hoặc chuyển tới Kanban.
-5. Sử dụng tiếng Việt thân thiện, chuyên nghiệp, rõ ràng.
+   - Khi người dùng hỏi về công việc, tiến độ dự án, deadline, việc quá hạn, việc cần làm, nhiệm vụ của họ: Hãy đối chiếu dữ liệu trên để trả lời chính xác, trung thực.
+   - QUY TẮC BẮT BUỘC KHI NHẮC ĐẾN CÔNG VIỆC: Bất cứ khi nào nhắc đến một công việc cụ thể trong hệ thống, bạn PHẢI bọc trong cú pháp [TASK: <taskId> | <taskTitle>] (ví dụ: [TASK: 12345 | Thiết kế trang chủ]). Giao diện Frontend sẽ tự động chuyển cú pháp này thành một thẻ Badge tương tác để người dùng click mở modal chi tiết hoặc chuyển tới Kanban.
+   - Nếu người dùng hỏi tìm kiếm công việc mà không có trong dữ liệu: Hãy thông báo lịch sự rằng không tìm thấy công việc tương ứng trong danh sách hiện tại, và gợi ý các công việc hoặc dự án đang có.
+
+3. PHONG CÁCH PHẢN HỒI:
+   - Sử dụng định dạng Markdown đẹp mắt: tiêu đề, gạch đầu dòng (bullet points), in đậm các từ khóa quan trọng.
+   - Tông giọng chuyên nghiệp, thông minh, tích cực, lịch sự, tôn trọng người dùng.
 `;
 
-    const model = getModelForRequest('gemini-1.5-flash', {
-      temperature: 0.2,
-      maxOutputTokens: 1500,
+    let historyPrompt = '';
+    if (history && history.length > 0) {
+      const recent = history.slice(-6);
+      historyPrompt =
+        `\nLỊCH SỬ TRÒ CHUYỆN GẦN ĐÂY:\n` +
+        recent.map((h) => `${h.role === 'user' ? 'Người dùng' : 'TaskFlow AI'}: ${h.text}`).join('\n') +
+        '\n';
+    }
+
+    const fullPrompt = `${systemInstruction}\n${historyPrompt}\nCÂU HỎI HIỆN TẠI CỦA NGƯỜI DÙNG: "${query}"\n\nHÃY TRẢ LỜI:`;
+
+    const { text } = await generateContentWithFallback(fullPrompt, {
+      preferredModel: 'gemini-3.5-flash',
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: 2000,
+      },
     });
 
-    const prompt = `${systemInstruction}\n\nCÂU HỎI CỦA NGƯỜI DÙNG: "${query}"\n\nHÃY TRẢ LỜI:`;
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
     if (!text || text.trim() === '') {
       return generateSmartFallbackResponse(query, context);
     }
@@ -944,6 +1131,54 @@ export function generateKpiFallbackReview(input: KpiPerformanceInput): string {
   return `🌟 Điểm sáng nổi bật: Đã tiếp nhận và bắt đầu thực hiện các đầu việc được giao trong kỳ.
 ⚡ Điểm cần cải thiện: Tỷ lệ hoàn thành và đúng hạn (${onTimeRate}%) cần cải thiện khẩn trương; tránh để nhiệm vụ bị trễ hạn kéo dài ảnh hưởng dự án.
 🚀 Lộ trình phát triển: Tham gia buổi kèm cặp 1-1 với Quản lý dự án để rà soát quy trình làm việc và thiết lập lại mục tiêu rõ ràng hơn.`;
+}
+
+export type VoiceIntentType =
+  | 'COMPLETE_TASK'
+  | 'UNCOMPLETE_TASK'
+  | 'CREATE_TASK'
+  | 'QUERY_SCHEDULE'
+  | 'NAVIGATE'
+  | 'UNKNOWN';
+
+export interface VoiceCommandTaskData {
+  title: string;
+  description?: string;
+  dueDate?: string;
+  priority: 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+  category?: 'CORE_PROJECT' | 'RD' | 'OPERATIONS';
+  estimatedHours?: number;
+}
+
+export interface VoiceCommandUserTask {
+  id: string;
+  title: string;
+  status: string;
+  dueDate?: string | null;
+  projectName?: string;
+}
+
+export interface MultiIntentVoiceResult {
+  intent: VoiceIntentType;
+  actionMessage: string;
+  speechFeedback: string;
+  data: {
+    targetTaskTitle?: string;
+    targetTaskId?: string | null;
+    taskData?: VoiceCommandTaskData;
+    dateFilter?: string;
+    speechResponse?: string;
+    path?: string;
+    confidence?: number;
+    rawText?: string;
+  };
+}
+
+export interface ProcessVoiceCommandInput {
+  transcript: string;
+  userId?: string;
+  currentDate?: string | Date;
+  userTasks?: VoiceCommandUserTask[];
 }
 
 export interface VoiceParsedResult {
@@ -1316,6 +1551,404 @@ TRẢ VỀ DUY NHẤT 1 ĐỐI TƯỢNG JSON THEO ĐỊNH DẠNG SAU:
 /**
  * 7. Sinh nhận xét đánh giá hiệu suất cá nhân KPI chuẩn nhân sự thông qua Gemini AI
  */
+/**
+ * 8.1 Bộ phân tích giọng nói dự phòng thông minh (Rule-based Fallback Voice Engine)
+ */
+export function fallbackProcessVoiceCommand(
+  text: string,
+  currentDateInput?: string | Date,
+  userTasks: VoiceCommandUserTask[] = []
+): MultiIntentVoiceResult {
+  const rawText = text.trim();
+  const lower = rawText.toLowerCase();
+
+  const baseDate = currentDateInput ? new Date(currentDateInput) : new Date();
+  const now = isNaN(baseDate.getTime()) ? new Date() : baseDate;
+
+  // 1. Ý định NAVIGATE (Chuyển trang)
+  const isNav =
+    lower.startsWith('mở ') ||
+    lower.startsWith('vào ') ||
+    lower.startsWith('chuyển ') ||
+    lower.startsWith('đi tới ') ||
+    lower.startsWith('xem ') ||
+    lower.includes('trang chủ') ||
+    lower.includes('bảng kanban') ||
+    lower.includes('bảng việc') ||
+    lower.includes('vào kpi');
+
+  if (isNav) {
+    if (lower.includes('kanban') || lower.includes('bảng việc') || lower.includes('dự án')) {
+      return {
+        intent: 'NAVIGATE',
+        actionMessage: 'Đang mở bảng Kanban Dự án',
+        speechFeedback: 'Đang chuyển đến bảng Kanban dự án.',
+        data: { path: '/projects', rawText, confidence: 0.95 },
+      };
+    }
+    if (lower.includes('kpi') || lower.includes('hiệu suất') || lower.includes('đánh giá')) {
+      return {
+        intent: 'NAVIGATE',
+        actionMessage: 'Đang mở trang KPI & Đánh giá hiệu suất',
+        speechFeedback: 'Đang chuyển đến trang KPI hiệu suất.',
+        data: { path: '/kpi', rawText, confidence: 0.95 },
+      };
+    }
+    if (lower.includes('lịch') || lower.includes('calendar')) {
+      return {
+        intent: 'NAVIGATE',
+        actionMessage: 'Đang mở Lịch làm việc',
+        speechFeedback: 'Đang chuyển đến trang Lịch làm việc.',
+        data: { path: '/calendar', rawText, confidence: 0.95 },
+      };
+    }
+    if (lower.includes('trang chủ') || lower.includes('dashboard') || lower.includes('bàn làm việc')) {
+      return {
+        intent: 'NAVIGATE',
+        actionMessage: 'Đang về Trang chủ Dashboard',
+        speechFeedback: 'Đang chuyển về trang chủ.',
+        data: { path: '/dashboard', rawText, confidence: 0.95 },
+      };
+    }
+    if (lower.includes('việc của tôi') || lower.includes('my work') || lower.includes('cá nhân')) {
+      return {
+        intent: 'NAVIGATE',
+        actionMessage: 'Đang mở trang Việc Của Tôi',
+        speechFeedback: 'Đang mở trang công việc cá nhân của bạn.',
+        data: { path: '/my-work', rawText, confidence: 0.95 },
+      };
+    }
+    if (lower.includes('hồ sơ') || lower.includes('profile')) {
+      return {
+        intent: 'NAVIGATE',
+        actionMessage: 'Đang mở Hồ Sơ Cá Nhân',
+        speechFeedback: 'Đang mở trang thông tin cá nhân.',
+        data: { path: '/profile', rawText, confidence: 0.95 },
+      };
+    }
+  }
+
+  // Helper tìm task gần đúng nhất dựa trên từ khóa
+  const findMatchingTask = (query: string, preferredStatus?: 'DONE' | 'NOT_DONE') => {
+    if (!userTasks || userTasks.length === 0) return null;
+    const cleanQ = query
+      .toLowerCase()
+      .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ' ')
+      .replace(/\b(đã|xong|rồi|chưa|hoàn thành|task|công việc|việc|bài|tập|dự án|cho tôi|giúp|với)\b/gi, ' ')
+      .trim();
+    const tokens = cleanQ.split(/\s+/).filter((w) => w.length >= 2);
+
+    let bestMatch: VoiceCommandUserTask | null = null;
+    let maxScore = 0;
+
+    for (const t of userTasks) {
+      if (preferredStatus === 'DONE' && t.status !== 'DONE') continue;
+      if (preferredStatus === 'NOT_DONE' && t.status === 'DONE') continue;
+
+      const titleLower = t.title.toLowerCase();
+      let score = 0;
+
+      if (cleanQ && titleLower.includes(cleanQ)) {
+        score += 10;
+      }
+      for (const tok of tokens) {
+        if (titleLower.includes(tok)) score += 3;
+      }
+
+      if (score > maxScore) {
+        maxScore = score;
+        bestMatch = t;
+      }
+    }
+
+    return maxScore >= 3 ? bestMatch : null;
+  };
+
+  // 2. Ý định UNCOMPLETE_TASK (Hủy hoàn thành / Chuyển về chưa xong)
+  const isUncomplete =
+    lower.includes('chưa xong') ||
+    lower.includes('chuyển về chưa xong') ||
+    lower.includes('hủy hoàn thành') ||
+    lower.includes('chưa hoàn thành') ||
+    lower.includes('đánh dấu chưa xong') ||
+    lower.includes('chưa xong việc');
+
+  if (isUncomplete) {
+    const matched = findMatchingTask(lower, 'DONE') || findMatchingTask(lower);
+    const targetTitle = matched ? matched.title : rawText;
+
+    return {
+      intent: 'UNCOMPLETE_TASK',
+      actionMessage: matched
+        ? `Đã chuyển về chưa hoàn thành: "${matched.title}"`
+        : `Chuyển về chưa hoàn thành: "${targetTitle}"`,
+      speechFeedback: matched
+        ? `Đã chuyển công việc ${matched.title} về trạng thái chưa hoàn thành.`
+        : `Đã đánh dấu công việc về chưa hoàn thành.`,
+      data: {
+        targetTaskId: matched ? matched.id : null,
+        targetTaskTitle: matched ? matched.title : undefined,
+        confidence: matched ? 0.95 : 0.75,
+        rawText,
+      },
+    };
+  }
+
+  // 3. Ý định COMPLETE_TASK (Hoàn thành công việc)
+  const isComplete =
+    lower.includes('hoàn thành') ||
+    lower.includes('xong task') ||
+    lower.includes('xong việc') ||
+    lower.includes('đã làm xong') ||
+    lower.includes('làm xong rồi') ||
+    lower.includes('xong rồi') ||
+    lower.includes('đánh dấu đã hoàn thành') ||
+    lower.includes('đánh dấu hoàn thành') ||
+    lower.includes('đánh dấu xong');
+
+  if (isComplete) {
+    const matched = findMatchingTask(lower, 'NOT_DONE') || findMatchingTask(lower);
+    const targetTitle = matched ? matched.title : rawText;
+
+    return {
+      intent: 'COMPLETE_TASK',
+      actionMessage: matched
+        ? `✓ Đã đánh dấu hoàn thành: "${matched.title}"`
+        : `✓ Đã đánh dấu hoàn thành: "${targetTitle}"`,
+      speechFeedback: matched
+        ? `Đã đánh dấu hoàn thành công việc ${matched.title}. Xuất sắc!`
+        : `Đã đánh dấu hoàn thành công việc.`,
+      data: {
+        targetTaskId: matched ? matched.id : null,
+        targetTaskTitle: matched ? matched.title : undefined,
+        confidence: matched ? 0.95 : 0.75,
+        rawText,
+      },
+    };
+  }
+
+  // 4. Ý định QUERY_SCHEDULE (Hỏi lịch trình / deadline)
+  const isQuerySchedule =
+    lower.includes('hôm nay có') ||
+    lower.includes('ngày mai có') ||
+    lower.includes('lịch trình') ||
+    lower.includes('deadline nào') ||
+    lower.includes('có việc gì') ||
+    lower.includes('có task nào') ||
+    lower.includes('hôm nay làm gì') ||
+    lower.includes('xem lịch');
+
+  if (isQuerySchedule) {
+    let targetD = new Date(now);
+    if (lower.includes('ngày mai') || lower.includes('mai')) {
+      targetD.setDate(targetD.getDate() + 1);
+    } else if (lower.includes('ngày kia') || lower.includes('ngày mốt')) {
+      targetD.setDate(targetD.getDate() + 2);
+    }
+
+    const y = targetD.getFullYear();
+    const m = String(targetD.getMonth() + 1).padStart(2, '0');
+    const d = String(targetD.getDate()).padStart(2, '0');
+    const dateStr = `${y}-${m}-${d}`;
+
+    const matchingTasks = userTasks.filter((t) => t.dueDate && t.dueDate.startsWith(dateStr));
+    let speechResponse = '';
+    if (matchingTasks.length === 0) {
+      speechResponse = `Lịch trình ngày ${d} tháng ${m} hiện không có deadline nào. Bạn có thể thảnh thơi hoặc lên kế hoạch mới.`;
+    } else {
+      const titles = matchingTasks.map((t) => t.title).slice(0, 3).join(', ');
+      speechResponse = `Lịch trình ngày ${d} tháng ${m} bạn có ${matchingTasks.length} việc: ${titles}.`;
+    }
+
+    return {
+      intent: 'QUERY_SCHEDULE',
+      actionMessage: `Lịch trình ngày ${dateStr}: ${matchingTasks.length} việc`,
+      speechFeedback: speechResponse,
+      data: {
+        dateFilter: dateStr,
+        speechResponse,
+        confidence: 0.9,
+        rawText,
+      },
+    };
+  }
+
+  // 5. Ý định CREATE_TASK (Thêm việc / Lên lịch hẹn)
+  const legacy = fallbackParseVoiceCommand(text);
+  const taskTitle = legacy.data.title || 'Công việc thêm bằng giọng nói';
+  const taskDeadline = legacy.data.deadline || now.toISOString();
+  const taskPriority = legacy.data.priority || 'MEDIUM';
+
+  return {
+    intent: 'CREATE_TASK',
+    actionMessage: `Đã tạo công việc: "${taskTitle}"`,
+    speechFeedback: `Đã tạo lịch công việc ${taskTitle} vào danh sách của bạn.`,
+    data: {
+      taskData: {
+        title: taskTitle,
+        dueDate: taskDeadline,
+        priority: taskPriority,
+        category: 'CORE_PROJECT',
+        estimatedHours: 2,
+      },
+      confidence: legacy.confidence,
+      rawText,
+    },
+  };
+}
+
+/**
+ * 8.2 Huấn luyện Gemini AI NLU phân tích đa ý định giọng nói tiếng Việt tự nhiên
+ */
+export async function processMultiIntentVoiceCommand(
+  input: ProcessVoiceCommandInput
+): Promise<MultiIntentVoiceResult> {
+  const { transcript, currentDate, userTasks = [] } = input;
+  const fallback = fallbackProcessVoiceCommand(transcript, currentDate, userTasks);
+  const apiKey = getGeminiApiKey();
+
+  if (!apiKey) {
+    return fallback;
+  }
+
+  try {
+    const baseDate = currentDate ? new Date(currentDate) : new Date();
+    const dateObj = isNaN(baseDate.getTime()) ? new Date() : baseDate;
+    const days = ['Chủ Nhật', 'Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy'];
+    const dayOfWeek = days[dateObj.getDay()];
+    const dateFormatted = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
+    const timeFormatted = `${String(dateObj.getHours()).padStart(2, '0')}:${String(dateObj.getMinutes()).padStart(2, '0')}`;
+
+    const tasksBrief = userTasks.slice(0, 40).map((t) => ({
+      id: t.id,
+      title: t.title,
+      status: t.status,
+      dueDate: t.dueDate || null,
+      projectName: t.projectName || 'Cá nhân',
+    }));
+
+    const prompt = `
+Bạn là Trợ lý AI Voice NLU tiếng Việt chuyên sâu cho nền tảng quản trị công việc & lịch trình TaskFlow năm 2026.
+Thời điểm hiện tại của hệ thống: ${dayOfWeek}, ngày ${dateFormatted} lúc ${timeFormatted}. Múi giờ Việt Nam (UTC+7).
+
+CÂU NÓI CỦA NGƯỜI DÙNG:
+"${transcript}"
+
+DANH SÁCH CÁC CÔNG VIỆC HIỆN TẠI CỦA NGƯỜI DÙNG (để bạn so khớp khi cần đánh dấu hoặc tóm tắt):
+${JSON.stringify(tasksBrief, null, 2)}
+
+BẠN CẦN PHÂN TÍCH VÀ PHÂN LOẠI CHÍNH XÁC VÀO 1 TRONG 5 Ý ĐỊNH (INTENTS):
+
+1. "COMPLETE_TASK":
+   - Người dùng muốn đánh dấu hoàn thành công việc/task/bài tập (Ví dụ: "đánh dấu đã hoàn thành bài tập", "xong task thiết kế giao diện rồi", "hoàn thành việc nộp báo cáo", "làm xong việc kiểm thử rồi").
+   - Hãy đối chiếu thông minh gần đúng giữa tên công việc trong câu nói và DANH SÁCH CÔNG VIỆC trên để tìm task tương ứng.
+   - Trả về: targetTaskId (chuỗi ID của task nếu tìm thấy, hoặc null), targetTaskTitle (tên công việc).
+   - actionMessage: "✓ Đã đánh dấu hoàn thành: [Tên task]"
+   - speechFeedback: "Đã đánh dấu hoàn thành công việc [Tên task]."
+
+2. "UNCOMPLETE_TASK":
+   - Người dùng muốn sửa lại thành chưa hoàn thành (Ví dụ: "chuyển bài tập về chưa xong", "task nộp báo cáo chưa hoàn thành đâu", "đánh dấu chưa xong việc kiểm thử", "hủy hoàn thành task...").
+   - Đối chiếu với DANH SÁCH CÔNG VIỆC để tìm task tương ứng.
+   - Trả về: targetTaskId (chuỗi ID nếu tìm thấy, hoặc null), targetTaskTitle (tên công việc).
+   - actionMessage: "Đã chuyển về chưa hoàn thành: [Tên task]"
+   - speechFeedback: "Đã chuyển công việc [Tên task] về trạng thái chưa hoàn thành."
+
+3. "CREATE_TASK":
+   - Người dùng muốn thêm công việc, lên lịch hẹn, nhắc nhở (Ví dụ: "nhắc tôi chiều mai 3 giờ họp đồ án", "thêm lịch bảo vệ tốt nghiệp sáng thứ sáu", "tạo task nghiên cứu websocket mức ưu tiên cao", "thêm vào ngày 10 tháng 11 nộp tài liệu").
+   - Trả về taskData với:
+     * title: Tiêu đề công việc ngắn gọn, súc tích (đã loại bỏ từ nối thời gian và tiền tố tạo việc).
+     * description: Mô tả thêm nếu có, hoặc để trống.
+     * dueDate: Chuỗi thời gian chuẩn ISO 8601 được tính toán chính xác dựa trên thời điểm hiện tại (${dateFormatted} ${timeFormatted}).
+     * priority: "URGENT" (nếu có từ "gấp", "khẩn cấp", "quan trọng"), "HIGH" (ưu tiên cao), "LOW" (ưu tiên thấp), hoặc "MEDIUM" (mặc định).
+     * category: "CORE_PROJECT", "RD", hoặc "OPERATIONS" (mặc định "CORE_PROJECT").
+     * estimatedHours: Số giờ dự kiến (mặc định 2).
+   - actionMessage: "Đã tạo công việc: [Tên task]"
+   - speechFeedback: "Đã lên lịch công việc [Tên task] vào [thời gian]."
+
+4. "QUERY_SCHEDULE":
+   - Người dùng hỏi lịch trình, deadline (Ví dụ: "hôm nay tôi có những việc gì", "ngày mai có deadline nào không", "lịch trình hôm nay", "tuần này có gì").
+   - Trả về dateFilter: ngày theo format "YYYY-MM-DD".
+   - Trả về speechResponse: câu trả lời bằng giọng nói thân thiện tóm tắt lịch trình dựa trên các công việc thực tế trong ngày đó.
+   - actionMessage: "Lịch trình ngày [YYYY-MM-DD]"
+   - speechFeedback: speechResponse
+
+5. "NAVIGATE":
+   - Người dùng muốn chuyển trang (Ví dụ: "mở kanban", "vào trang kpi", "về trang chủ", "mở lịch", "vào việc của tôi", "hồ sơ cá nhân").
+   - Trả về path:
+     * Kanban: "/projects"
+     * KPI: "/kpi"
+     * Lịch: "/calendar"
+     * Trang chủ: "/dashboard"
+     * Việc của tôi: "/my-work"
+     * Hồ sơ cá nhân: "/profile"
+   - actionMessage: "Điều hướng đến [Tên trang]"
+   - speechFeedback: "Đang mở [Tên trang]."
+
+TRẢ VỀ DUY NHẤT 1 ĐỐI TƯỢNG JSON THUẦN TÚY THEO CẤU TRÚC:
+{
+  "intent": "COMPLETE_TASK" | "UNCOMPLETE_TASK" | "CREATE_TASK" | "QUERY_SCHEDULE" | "NAVIGATE" | "UNKNOWN",
+  "actionMessage": "Thông báo ngắn gọn",
+  "speechFeedback": "Câu phản hồi âm thanh thân thiện tiếng Việt",
+  "data": {
+    "targetTaskTitle": "string",
+    "targetTaskId": "string | null",
+    "taskData": {
+      "title": "string",
+      "description": "string",
+      "dueDate": "ISO 8601 string",
+      "priority": "LOW" | "MEDIUM" | "HIGH" | "URGENT",
+      "category": "CORE_PROJECT" | "RD" | "OPERATIONS",
+      "estimatedHours": 2
+    },
+    "dateFilter": "YYYY-MM-DD",
+    "speechResponse": "string",
+    "path": "/projects" | "/kpi" | "/calendar" | "/dashboard" | "/my-work" | "/profile"
+  }
+}
+`;
+
+    const model = getModelForRequest('gemini-1.5-flash', {
+      temperature: 0.1,
+      responseMimeType: 'application/json',
+    });
+
+    const result = await model.generateContent(prompt);
+    const textRes = result.response.text();
+    const parsed = cleanAndParseJSON<MultiIntentVoiceResult>(textRes);
+
+    if (parsed && parsed.intent) {
+      const mergedData = {
+        ...fallback.data,
+        ...parsed.data,
+        rawText: transcript,
+      };
+
+      if (
+        (parsed.intent === 'COMPLETE_TASK' || parsed.intent === 'UNCOMPLETE_TASK') &&
+        !mergedData.targetTaskId &&
+        fallback.data.targetTaskId
+      ) {
+        mergedData.targetTaskId = fallback.data.targetTaskId;
+        if (!mergedData.targetTaskTitle && fallback.data.targetTaskTitle) {
+          mergedData.targetTaskTitle = fallback.data.targetTaskTitle;
+        }
+      }
+
+      return {
+        intent: parsed.intent,
+        actionMessage: parsed.actionMessage || fallback.actionMessage,
+        speechFeedback: parsed.speechFeedback || fallback.speechFeedback,
+        data: mergedData,
+      };
+    }
+
+    return fallback;
+  } catch (error: any) {
+    console.warn('[Gemini][processMultiIntentVoiceCommand] Lỗi gọi Gemini API, dùng Fallback NLU:', error?.message);
+    return fallback;
+  }
+}
+
 export async function generateKpiPerformanceReview(input: KpiPerformanceInput): Promise<string> {
   const apiKey = getGeminiApiKey();
   if (!apiKey) {
@@ -1362,5 +1995,271 @@ Văn phong chuẩn mực HR, tích cực, mang tính khích lệ và định hư
   } catch (error: any) {
     console.warn('[Gemini][generateKpiPerformanceReview] Lỗi gọi Gemini API, sử dụng Smart Fallback:', error?.message);
     return generateKpiFallbackReview(input);
+  }
+}
+
+
+/**
+ * 10. AI CÂN BẰNG TẢI NHÂN SỰ & TỐI ƯU HÓA TÀI NGUYÊN (Workload Balancing & Resource Optimization)
+ */
+export interface RebalanceMemberInput {
+  userId: string;
+  name: string;
+  email: string;
+  avatar?: string | null;
+  role?: string;
+  departmentName?: string;
+  assignedHours: number;
+  standardCapacity: number;
+  workloadPercent: number;
+  status: 'OVERLOADED' | 'BALANCED' | 'UNDERLOADED';
+  tasks: Array<{
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+    estimatedHours: number;
+    dueDate?: string | Date | null;
+  }>;
+  reallocatableTasks: Array<{
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+    estimatedHours: number;
+    dueDate?: string | Date | null;
+  }>;
+}
+
+export interface RebalanceRecommendation {
+  taskId: string;
+  taskTitle: string;
+  hours: number;
+  fromUserId: string;
+  fromUserName: string;
+  toUserId: string;
+  toUserName: string;
+  reason: string;
+}
+
+export interface RebalanceResult {
+  recommendations: RebalanceRecommendation[];
+  summary: string;
+}
+
+/**
+ * Thuật toán Fallback Cân Bằng Tải ngoại tuyến:
+ * Áp dụng giải thuật tham lam (Greedy Load Balancing) để phân bổ task TODO từ người quá tải sang người rảnh rỗi.
+ */
+export function fallbackRebalanceWorkload(
+  members: RebalanceMemberInput[],
+  standardCapacity: number = 40
+): RebalanceResult {
+  const overloadedMembers = members.filter((m) => m.workloadPercent > 100);
+  if (overloadedMembers.length === 0) {
+    return {
+      recommendations: [],
+      summary: 'Hiện tại tất cả nhân sự đều ở mức tải an toàn (dưới 100% định mức tiêu chuẩn), chưa cần điều chuyển công việc.',
+    };
+  }
+
+  // Tạo bản sao để mô phỏng tải động
+  const workingMembers = members.map((m) => ({
+    userId: m.userId,
+    name: m.name,
+    assignedHours: m.assignedHours,
+    standardCapacity: m.standardCapacity || standardCapacity,
+    reallocatableTasks: [...m.reallocatableTasks],
+  }));
+
+  const recommendations: RebalanceRecommendation[] = [];
+
+  // Duyệt qua từng người quá tải (sắp xếp giảm dần theo mức độ quá tải)
+  const sortedOverloaded = [...workingMembers]
+    .filter((m) => (m.assignedHours / m.standardCapacity) * 100 > 100)
+    .sort((a, b) => b.assignedHours / b.standardCapacity - a.assignedHours / a.standardCapacity);
+
+  for (const fromUser of sortedOverloaded) {
+    // Sắp xếp task TODO theo số giờ giảm dần
+    fromUser.reallocatableTasks.sort((a, b) => b.estimatedHours - a.estimatedHours);
+
+    for (const task of fromUser.reallocatableTasks) {
+      const currentFromPercent = (fromUser.assignedHours / fromUser.standardCapacity) * 100;
+      if (currentFromPercent <= 100) {
+        // Người chuyển đã hạ xuống mức an toàn <= 100%
+        break;
+      }
+
+      const taskHours = typeof task.estimatedHours === 'number' && task.estimatedHours > 0 ? task.estimatedHours : 4;
+
+      // Tìm các ứng viên nhận việc khác fromUser, sắp xếp theo tải tăng dần
+      const candidates = workingMembers
+        .filter((c) => c.userId !== fromUser.userId)
+        .sort((a, b) => {
+          const aRatio = a.assignedHours / a.standardCapacity;
+          const bRatio = b.assignedHours / b.standardCapacity;
+          return aRatio - bRatio;
+        });
+
+      // Tìm người nhận mà sau khi cộng task vẫn <= 100%
+      let bestCandidate = candidates.find(
+        (c) => ((c.assignedHours + taskHours) / c.standardCapacity) * 100 <= 100
+      );
+
+      // Nếu không có ai <= 100%, chọn ứng viên rảnh rỗi nhất nếu tải hiện tại < 90%
+      if (!bestCandidate && candidates.length > 0 && (candidates[0].assignedHours / candidates[0].standardCapacity) * 100 < 90) {
+        bestCandidate = candidates[0];
+      }
+
+      if (bestCandidate) {
+        const oldFromPercent = Math.round((fromUser.assignedHours / fromUser.standardCapacity) * 100);
+        const oldToPercent = Math.round((bestCandidate.assignedHours / bestCandidate.standardCapacity) * 100);
+
+        fromUser.assignedHours -= taskHours;
+        bestCandidate.assignedHours += taskHours;
+
+        const newFromPercent = Math.round((fromUser.assignedHours / fromUser.standardCapacity) * 100);
+        const newToPercent = Math.round((bestCandidate.assignedHours / bestCandidate.standardCapacity) * 100);
+
+        recommendations.push({
+          taskId: task.id,
+          taskTitle: task.title,
+          hours: taskHours,
+          fromUserId: fromUser.userId,
+          fromUserName: fromUser.name,
+          toUserId: bestCandidate.userId,
+          toUserName: bestCandidate.name,
+          reason: `Giảm tải cho ${fromUser.name} (${oldFromPercent}% -> ${newFromPercent}%) và tận dụng thời gian trống của ${bestCandidate.name} (${oldToPercent}% -> ${newToPercent}%)`,
+        });
+      }
+    }
+  }
+
+  if (recommendations.length === 0) {
+    return {
+      recommendations: [],
+      summary: 'Các nhân sự quá tải không còn công việc ở trạng thái Chờ làm (TODO) hoặc các thành viên khác đã đạt tối đa công suất.',
+    };
+  }
+
+  return {
+    recommendations,
+    summary: `Thuật toán AI đã đề xuất điều chuyển tối ưu ${recommendations.length} công việc từ nhân sự quá tải sang các nhân sự có công suất phù hợp, giúp cân bằng hiệu suất làm việc toàn đội ngũ.`,
+  };
+}
+
+/**
+ * Đề xuất Tái Cân bằng Tải bằng Google Gemini AI (kèm Fallback tự động)
+ */
+export async function rebalanceProjectWorkloadWithGemini(
+  members: RebalanceMemberInput[],
+  standardCapacity: number = 40
+): Promise<RebalanceResult> {
+  const overloadedMembers = members.filter((m) => m.workloadPercent > 100);
+  if (overloadedMembers.length === 0) {
+    return {
+      recommendations: [],
+      summary: 'Hiện tại tất cả nhân sự đều ở mức tải an toàn (dưới 100% định mức tiêu chuẩn), chưa cần điều chuyển công việc.',
+    };
+  }
+
+  const todoTasksOfOverloaded = overloadedMembers.flatMap((m) =>
+    m.reallocatableTasks.map((t) => ({
+      taskId: t.id,
+      taskTitle: t.title,
+      hours: t.estimatedHours || 4,
+      priority: t.priority,
+      fromUserId: m.userId,
+      fromUserName: m.name,
+      dueDate: t.dueDate,
+    }))
+  );
+
+  if (todoTasksOfOverloaded.length === 0) {
+    return {
+      recommendations: [],
+      summary: 'Các nhân sự quá tải hiện không có công việc nào ở trạng thái Chờ làm (TODO) để có thể tái phân bổ an toàn.',
+    };
+  }
+
+  try {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      console.warn('[Gemini] Không có GEMINI_API_KEY, kích hoạt thuật toán Fallback Cân Bằng Tải.');
+      return fallbackRebalanceWorkload(members, standardCapacity);
+    }
+
+    const membersSummary = members.map((m) => ({
+      userId: m.userId,
+      name: m.name,
+      role: m.role || 'Thành viên',
+      assignedHours: m.assignedHours,
+      standardCapacity: m.standardCapacity || standardCapacity,
+      workloadPercent: m.workloadPercent,
+      workloadStatus: m.status,
+    }));
+
+    const prompt = `
+Bạn là Kỹ sư Trưởng kiêm Chuyên gia Điều phối Nhân sự & Tối ưu Tài nguyên (Resource Allocation & Workload Optimization Expert).
+Nhiệm vụ của bạn là phân tích dữ liệu tải nhân sự trong sprint/kỳ của dự án và đưa ra phương án TÁI CÂN BẰNG TẢI (AI Workload Rebalance) tối ưu nhất.
+
+THÔNG TIN ĐỊNH MỨC & TẢI NHÂN SỰ DỰ ÁN (Định mức chuẩn: ${standardCapacity}h/sprint):
+${JSON.stringify(membersSummary, null, 2)}
+
+DANH SÁCH CÔNG VIỆC TRẠNG THÁI TODO CỦA CÁC NHÂN SỰ ĐANG QUÁ TẢI (> 100%):
+${JSON.stringify(todoTasksOfOverloaded, null, 2)}
+
+QUY TẮC ĐIỀU PHỐI BẮT BUỘC:
+1. Chỉ điều chuyển các task ở trạng thái TODO từ những người bị OVERLOADED (>100%) sang những người UNDERLOADED (<60%) hoặc BALANCED (60%-100%).
+2. Không gán việc khiến người nhận bị đẩy lên mức QUÁ TẢI (>100% định mức ${standardCapacity}h).
+3. Đưa % tải của người chuyển về mức an toàn (60% - 100%) nếu có đủ năng lực tiếp nhận.
+4. Ưu tiên phân bổ cho những người có % tải thấp nhất hoặc đang rảnh rỗi.
+5. Chỉ chọn các taskId và userId có thật trong danh sách được cung cấp.
+6. Mỗi mục điều chuyển phải có lý do súc tích, chuyên nghiệp bằng tiếng Việt, nêu rõ mức % tải trước và sau (Ví dụ: "Giảm tải cho Du (130% -> 90%) và tận dụng thời gian trống của Như Lê (45% -> 65%)").
+
+YÊU CẦU ĐẦU RA BẮT BUỘC: Trả về đối tượng JSON thuần túy (không kèm giải thích bên ngoài hay markdown râu ria) theo mẫu:
+{
+  "recommendations": [
+    {
+      "taskId": "ID chính xác của task",
+      "taskTitle": "Tên công việc",
+      "hours": 8,
+      "fromUserId": "ID người chuyển",
+      "fromUserName": "Tên người chuyển",
+      "toUserId": "ID người nhận",
+      "toUserName": "Tên người nhận",
+      "reason": "Giảm tải cho Du (130% -> 90%) và tận dụng thời gian trống của Như Lê (45% -> 65%)"
+    }
+  ],
+  "summary": "Tóm tắt ngắn gọn 1-2 câu về hiệu quả và tác động của phương án cân bằng tải này"
+}
+`;
+
+    const generationConfig: GenerationConfig = {
+      temperature: 0.2,
+      topP: 0.8,
+      topK: 40,
+      responseMimeType: 'application/json',
+    };
+
+    const model = getModelForRequest('gemini-1.5-flash', generationConfig);
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
+    const parsed = cleanAndParseJSON<RebalanceResult>(responseText);
+
+    if (parsed && Array.isArray(parsed.recommendations)) {
+      const validRecommendations = parsed.recommendations.filter(
+        (r) => r.taskId && r.toUserId && r.fromUserId && r.taskId.trim() !== ''
+      );
+      return {
+        recommendations: validRecommendations,
+        summary: parsed.summary || `AI đã đề xuất điều chuyển ${validRecommendations.length} công việc nhằm tối ưu hóa tải dự án.`,
+      };
+    }
+
+    return fallbackRebalanceWorkload(members, standardCapacity);
+  } catch (error: any) {
+    console.warn('[Gemini][rebalanceProjectWorkloadWithGemini] Lỗi gọi Gemini API, sử dụng Thuật toán Fallback:', error?.message);
+    return fallbackRebalanceWorkload(members, standardCapacity);
   }
 }

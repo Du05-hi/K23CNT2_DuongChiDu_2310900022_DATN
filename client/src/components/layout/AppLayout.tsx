@@ -19,6 +19,7 @@ import {
   ChevronRight,
   ChevronLeft,
   Calendar as CalendarIcon,
+  ClipboardCheck,
 } from 'lucide-react';
 import {
   useAppDispatch,
@@ -122,6 +123,11 @@ export const AppLayout: React.FC = () => {
       icon: Target,
       badge: userKpiRank || 'Hạng A',
       badgeStyle: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 font-black',
+    },
+    {
+      name: 'Phê Duyệt & Đề Xuất',
+      path: '/approvals',
+      icon: ClipboardCheck,
     },
     {
       name: 'AI Assistant',

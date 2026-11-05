@@ -88,6 +88,8 @@ model User {
   isActive        Boolean         @default(true)
   googleId        String?         @unique
   avatar          String?
+  phone           String?         @db.VarChar(20)
+  jobTitle        String?         @db.VarChar(100)
   departmentId    String?
   department      Department?     @relation(fields: [departmentId], references: [id])
   createdProjects Project[]       @relation("ProjectCreator")
@@ -103,6 +105,8 @@ model User {
   activityLogs    ActivityLog[]
   reviewedTasks   Task[]          @relation("TaskReviewer")
   completedChecklists TaskChecklist[] @relation("ChecklistCompletedBy")
+  requestedApprovals ApprovalRequest[] @relation("RequestedApprovals")
+  reviewedApprovals  ApprovalRequest[] @relation("ReviewedApprovals")
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 }
@@ -154,7 +158,7 @@ model Task {
   projectId       String
   project         Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   assigneeId      String?
-  assignee        User?           @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  assignee        User?           @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
   createdById     String
   creator         User            @relation("TaskCreator", fields: [createdById], references: [id])
   subTasks        SubTask[]
@@ -169,6 +173,7 @@ model Task {
   dependencies    TaskDependency[] @relation("TaskDependencies")
   dependedBy      TaskDependency[] @relation("TaskDependedBy")
   checklists      TaskChecklist[]
+  approvalRequests ApprovalRequest[]
 
   // Tự liên kết (Self-relation) để tạo cấu trúc cây Công việc lớn - Công việc con (WBS)
   parentId        String?
@@ -240,7 +245,7 @@ model TaskAttachment {
   fileType    String
   fileSize    Int
   uploadedById String?
-  uploader    User?    @relation("AttachmentUploader", fields: [uploadedById], references: [id])
+  uploader    User?    @relation("AttachmentUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -391,4 +396,42 @@ model PayrollRecord {
 
   @@unique([userId, period])
   @@index([period])
+}
+
+model ApprovalRequest {
+  id            String       @id @default(uuid())
+  title         String
+  type          String       // LEAVE (Nghỉ phép), OT (Làm thêm giờ), EXTEND_DEADLINE (Gia hạn task), RESOURCE (Cấp thiết bị/tài nguyên)
+  description   String       @db.Text
+  priority      String       @default("MEDIUM") // LOW, MEDIUM, HIGH, URGENT
+  status        String       @default("PENDING") // PENDING, APPROVED, REJECTED
+  responseNote  String?      @db.Text // Lý do phê duyệt hoặc từ chối
+  
+  // Quan hệ
+  requesterId   String
+  requester     User         @relation("RequestedApprovals", fields: [requesterId], references: [id], onDelete: Cascade)
+  
+  reviewerId    String?
+  reviewer      User?        @relation("ReviewedApprovals", fields: [reviewerId], references: [id], onDelete: SetNull)
+  
+  taskId        String?
+  task          Task?        @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  
+  startDate     DateTime?
+  endDate       DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([requesterId])
+  @@index([reviewerId])
+  @@index([taskId])
+  @@index([status])
+  @@index([type])
+}
+
+model SystemSetting {
+  key         String   @id
+  value       String   @db.Text
+  description String?
+  updatedAt   DateTime @updatedAt
 }

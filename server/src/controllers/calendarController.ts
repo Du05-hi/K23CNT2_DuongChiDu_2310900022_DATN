@@ -3,7 +3,7 @@ import { prisma } from '../config/prisma';
 import { AuthenticatedRequest } from '../middlewares/authMiddleware';
 import { logActivity } from '../services/activityLogService';
 import { createNotification, sendRealtimeNotification } from '../services/notificationService';
-import { parseVoiceIntent } from '../services/geminiService';
+import { parseVoiceIntent, processMultiIntentVoiceCommand, VoiceCommandUserTask } from '../services/geminiService';
 
 /**
  * Lấy toàn bộ sự kiện và công việc trên lịch biểu (Calendar Matrix)
@@ -500,17 +500,57 @@ export const parseCalendarVoiceIntent = async (req: AuthenticatedRequest, res: R
       return;
     }
 
-    const { text } = req.body;
-    if (!text || typeof text !== 'string' || !text.trim()) {
+    const { text, transcript } = req.body;
+    const queryText = (transcript || text || '').trim();
+    if (!queryText) {
       res.status(400).json({ success: false, message: 'Nội dung câu lệnh giọng nói không được để trống.' });
       return;
     }
 
-    const parsedResult = await parseVoiceIntent(text.trim());
+    const userTasks = await prisma.task.findMany({
+      where: {
+        OR: [
+          { assigneeId: user.id },
+          { createdById: user.id },
+          { project: { members: { some: { userId: user.id } } } },
+        ],
+      },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        dueDate: true,
+        project: { select: { name: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+    });
+
+    const parsedResult = await processMultiIntentVoiceCommand({
+      transcript: queryText,
+      userId: user.id,
+      currentDate: new Date(),
+      userTasks: userTasks.map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        dueDate: t.dueDate ? t.dueDate.toISOString() : null,
+        projectName: t.project?.name,
+      })),
+    });
 
     res.status(200).json({
       success: true,
-      data: parsedResult,
+      intent: parsedResult.intent,
+      actionMessage: parsedResult.actionMessage,
+      speechFeedback: parsedResult.speechFeedback,
+      data: {
+        ...parsedResult.data,
+        title: parsedResult.data.taskData?.title || parsedResult.data.targetTaskTitle,
+        date: parsedResult.data.dateFilter || (parsedResult.data.taskData?.dueDate ? parsedResult.data.taskData.dueDate.slice(0, 10) : undefined),
+        deadline: parsedResult.data.taskData?.dueDate,
+        priority: parsedResult.data.taskData?.priority || 'MEDIUM',
+      },
     });
   } catch (error: any) {
     console.error('Lỗi parseCalendarVoiceIntent:', error);

@@ -12,11 +12,13 @@ import {
   LiveDataContext,
   ProjectRiskInput,
   TaskSummaryInput,
+  processMultiIntentVoiceCommand,
+  VoiceCommandUserTask,
 } from '../services/geminiService';
 import { canAccessProject } from '../utils/projectAccess';
 
 /**
- * 1. Tự động phân rã công việc lớn thành tối đa 8 sub-tasks chi tiết bằng Gemini AI
+ * 1. Tá»± Ä‘á»™ng phÃ¢n rÃ£ cÃ´ng viá»‡c lá»›n thÃ nh tá»‘i Ä‘a 8 sub-tasks chi tiáº¿t báº±ng Gemini AI
  */
 export const breakdownTask = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
@@ -25,7 +27,7 @@ export const breakdownTask = async (req: AuthenticatedRequest, res: Response): P
     if (!title || !title.trim()) {
       res.status(200).json({
         success: false,
-        message: 'Tiêu đề công việc là bắt buộc để AI phân tích phân tách.',
+        message: 'TiÃªu Ä‘á» cÃ´ng viá»‡c lÃ  báº¯t buá»™c Ä‘á»ƒ AI phÃ¢n tÃ­ch phÃ¢n tÃ¡ch.',
       });
       return;
     }
@@ -34,20 +36,20 @@ export const breakdownTask = async (req: AuthenticatedRequest, res: Response): P
 
     res.status(200).json({
       success: true,
-      message: 'AI phân tách công việc thành công!',
+      message: 'AI phÃ¢n tÃ¡ch cÃ´ng viá»‡c thÃ nh cÃ´ng!',
       data: suggestions,
     });
   } catch (error: any) {
-    console.error('[AI][breakdownTask] Lỗi:', error);
+    console.error('[AI][breakdownTask] Lá»—i:', error);
     res.status(200).json({
       success: false,
-      message: 'Trợ lý AI hiện chưa thể phân tích, vui lòng thử lại sau.',
+      message: 'Trá»£ lÃ½ AI hiá»‡n chÆ°a thá»ƒ phÃ¢n tÃ­ch, vui lÃ²ng thá»­ láº¡i sau.',
     });
   }
 };
 
 /**
- * Phân rã công việc WBS đa tầng & tự động gán Subtasks + DoD checklist bằng Gemini AI Copilot
+ * PhÃ¢n rÃ£ cÃ´ng viá»‡c WBS Ä‘a táº§ng & tá»± Ä‘á»™ng gÃ¡n Subtasks + DoD checklist báº±ng Gemini AI Copilot
  */
 export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
@@ -58,7 +60,7 @@ export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Re
     if (!resolvedTaskId && !taskTitle && !title) {
       res.status(400).json({
         success: false,
-        message: 'Cần cung cấp taskId hoặc tiêu đề công việc để AI thực hiện phân rã.',
+        message: 'Cáº§n cung cáº¥p taskId hoáº·c tiÃªu Ä‘á» cÃ´ng viá»‡c Ä‘á»ƒ AI thá»±c hiá»‡n phÃ¢n rÃ£.',
       });
       return;
     }
@@ -79,12 +81,12 @@ export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Re
       });
 
       if (!currentTask) {
-        res.status(404).json({ success: false, message: 'Công việc không tồn tại trong hệ thống.' });
+        res.status(404).json({ success: false, message: 'CÃ´ng viá»‡c khÃ´ng tá»“n táº¡i trong há»‡ thá»‘ng.' });
         return;
       }
 
       if (!req.user || !(await canAccessProject(req.user, currentTask.projectId))) {
-        res.status(403).json({ success: false, message: 'Bạn không có quyền truy cập dự án của công việc này.' });
+        res.status(403).json({ success: false, message: 'Báº¡n khÃ´ng cÃ³ quyá»n truy cáº­p dá»± Ã¡n cá»§a cÃ´ng viá»‡c nÃ y.' });
         return;
       }
 
@@ -93,21 +95,21 @@ export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Re
       queryProjectScope = currentTask.project?.name || queryProjectScope;
     }
 
-    // Gọi Gemini AI phân tích
+    // Gá»i Gemini AI phÃ¢n tÃ­ch
     const suggestions = await geminiEnterpriseBreakdown(queryTitle, queryDescription, queryProjectScope);
 
-    // Nếu có resolvedTaskId, lưu subtasks và DoD vào Database
+    // Náº¿u cÃ³ resolvedTaskId, lÆ°u subtasks vÃ  DoD vÃ o Database
     let createdSubtasks: any[] = [];
     let createdChecklists: any[] = [];
 
     if (currentTask && userId) {
-      // 1. Đánh dấu task cha isParent = true
+      // 1. ÄÃ¡nh dáº¥u task cha isParent = true
       await prisma.task.update({
         where: { id: currentTask.id },
         data: { isParent: true },
       });
 
-      // 2. Tạo subtasks trong bảng Task
+      // 2. Táº¡o subtasks trong báº£ng Task
       const basePosition = currentTask.subtasks?.length || 0;
       for (let i = 0; i < suggestions.length; i++) {
         const sub = suggestions[i];
@@ -132,7 +134,7 @@ export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Re
         createdSubtasks.push(newSubtask);
       }
 
-      // 3. Tạo tiêu chí DoD (TaskChecklist) gắn với task cha
+      // 3. Táº¡o tiÃªu chÃ­ DoD (TaskChecklist) gáº¯n vá»›i task cha
       const allDodItems: string[] = [];
       suggestions.forEach((sub) => {
         if (Array.isArray(sub.dodChecklist)) {
@@ -142,7 +144,7 @@ export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Re
         }
       });
 
-      // Lọc các DoD chưa tồn tại
+      // Lá»c cÃ¡c DoD chÆ°a tá»“n táº¡i
       const existingContents = new Set((currentTask.checklists || []).map((c: any) => c.content));
       const dodToCreate = allDodItems.filter((c) => !existingContents.has(c));
 
@@ -158,7 +160,7 @@ export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Re
         createdChecklists.push(cl);
       }
 
-      // Emit socket cập nhật
+      // Emit socket cáº­p nháº­t
       const io = req.app.get('io');
       if (io) {
         io.to(`project:${currentTask.projectId}`).emit('task:wbs_generated', {
@@ -172,7 +174,7 @@ export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Re
 
     res.status(200).json({
       success: true,
-      message: 'Gemini AI Copilot đã phân rã công việc WBS & thiết lập tiêu chí DoD thành công!',
+      message: 'Gemini AI Copilot Ä‘Ã£ phÃ¢n rÃ£ cÃ´ng viá»‡c WBS & thiáº¿t láº­p tiÃªu chÃ­ DoD thÃ nh cÃ´ng!',
       data: {
         suggestions,
         createdSubtasks,
@@ -180,17 +182,17 @@ export const enterpriseTaskBreakdown = async (req: AuthenticatedRequest, res: Re
       },
     });
   } catch (error: any) {
-    console.error('[AI][enterpriseTaskBreakdown] Lỗi:', error);
+    console.error('[AI][enterpriseTaskBreakdown] Lá»—i:', error);
     res.status(500).json({
       success: false,
-      message: 'Không thể phân rã công việc bằng AI lúc này.',
+      message: 'KhÃ´ng thá»ƒ phÃ¢n rÃ£ cÃ´ng viá»‡c báº±ng AI lÃºc nÃ y.',
       error: error?.message,
     });
   }
 };
 
 /**
- * 2. Phân tích tiến độ dự án và sinh báo cáo nhận xét chi tiết bằng tiếng Việt dạng Markdown
+ * 2. PhÃ¢n tÃ­ch tiáº¿n Ä‘á»™ dá»± Ã¡n vÃ  sinh bÃ¡o cÃ¡o nháº­n xÃ©t chi tiáº¿t báº±ng tiáº¿ng Viá»‡t dáº¡ng Markdown
  */
 export const generateSummary = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
@@ -199,7 +201,7 @@ export const generateSummary = async (req: AuthenticatedRequest, res: Response):
     if (!projectId) {
       res.status(200).json({
         success: false,
-        message: 'Vui lòng cung cấp projectId cần đánh giá tiến độ.',
+        message: 'Vui lÃ²ng cung cáº¥p projectId cáº§n Ä‘Ã¡nh giÃ¡ tiáº¿n Ä‘á»™.',
       });
       return;
     }
@@ -220,25 +222,25 @@ export const generateSummary = async (req: AuthenticatedRequest, res: Response):
     if (!project) {
       res.status(200).json({
         success: false,
-        message: 'Không tìm thấy thông tin dự án chỉ định.',
+        message: 'KhÃ´ng tÃ¬m tháº¥y thÃ´ng tin dá»± Ã¡n chá»‰ Ä‘á»‹nh.',
       });
       return;
     }
     if (!req.user || !(await canAccessProject(req.user, project.id))) {
       res.status(200).json({
         success: false,
-        message: 'Bạn không có quyền xem dữ liệu của dự án này.',
+        message: 'Báº¡n khÃ´ng cÃ³ quyá»n xem dá»¯ liá»‡u cá»§a dá»± Ã¡n nÃ y.',
       });
       return;
     }
 
     const taskInputs: TaskSummaryInput[] = project.tasks.map((t) => ({
       id: t.id,
-      title: t.title || 'Công việc chưa có tiêu đề',
+      title: t.title || 'CÃ´ng viá»‡c chÆ°a cÃ³ tiÃªu Ä‘á»',
       status: t.status || 'TODO',
       priority: t.priority || 'MEDIUM',
       dueDate: t.dueDate ? t.dueDate.toISOString() : null,
-      assigneeName: t.assignee?.name || 'Chưa phân công',
+      assigneeName: t.assignee?.name || 'ChÆ°a phÃ¢n cÃ´ng',
       estimatedHours: typeof t.estimatedHours === 'number' ? t.estimatedHours : 0,
       actualHours: typeof t.actualHours === 'number' ? t.actualHours : 0,
     }));
@@ -254,10 +256,10 @@ export const generateSummary = async (req: AuthenticatedRequest, res: Response):
       },
     });
   } catch (error: any) {
-    console.error('[AI][generateSummary] Lỗi:', error);
+    console.error('[AI][generateSummary] Lá»—i:', error);
     res.status(200).json({
       success: false,
-      message: 'Trợ lý AI hiện chưa thể phân tích, vui lòng thử lại sau.',
+      message: 'Trá»£ lÃ½ AI hiá»‡n chÆ°a thá»ƒ phÃ¢n tÃ­ch, vui lÃ²ng thá»­ láº¡i sau.',
     });
   }
 };
@@ -266,7 +268,7 @@ export const generateMyWorkInsights = async (req: AuthenticatedRequest, res: Res
   try {
     const user = req.user;
     if (!user) {
-      res.status(200).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      res.status(200).json({ success: false, message: 'ChÆ°a xÃ¡c thá»±c ngÆ°á»i dÃ¹ng.' });
       return;
     }
 
@@ -287,39 +289,39 @@ export const generateMyWorkInsights = async (req: AuthenticatedRequest, res: Res
 
     const safeTasks = tasks.map((task) => ({
       id: task.id,
-      title: task.title || 'Công việc chưa được đặt tên',
+      title: task.title || 'CÃ´ng viá»‡c chÆ°a Ä‘Æ°á»£c Ä‘áº·t tÃªn',
       status: task.status || 'TODO',
       priority: task.priority || 'MEDIUM',
       dueDate: task.dueDate ? task.dueDate.toISOString() : null,
       estimatedHours: typeof task.estimatedHours === 'number' ? task.estimatedHours : 0,
       actualHours: typeof task.actualHours === 'number' ? task.actualHours : 0,
-      projectName: task.project?.name || 'Dự án chưa xác định',
-      assigneeName: user.name || 'Bạn',
+      projectName: task.project?.name || 'Dá»± Ã¡n chÆ°a xÃ¡c Ä‘á»‹nh',
+      assigneeName: user.name || 'Báº¡n',
     }));
 
-    const summaryMarkdown = await generatePersonalWorkInsights(user.name ?? 'nhân viên', safeTasks);
+    const summaryMarkdown = await generatePersonalWorkInsights(user.name ?? 'nhÃ¢n viÃªn', safeTasks);
 
     res.status(200).json({
       success: true,
       data: { summaryMarkdown },
     });
   } catch (error: any) {
-    console.error('[AI][generateMyWorkInsights] Lỗi:', error);
+    console.error('[AI][generateMyWorkInsights] Lá»—i:', error);
     res.status(200).json({
       success: false,
-      message: 'Trợ lý AI hiện chưa thể phân tích, vui lòng thử lại sau.',
+      message: 'Trá»£ lÃ½ AI hiá»‡n chÆ°a thá»ƒ phÃ¢n tÃ­ch, vui lÃ²ng thá»­ láº¡i sau.',
     });
   }
 };
 
 /**
- * 3. Tự động nhận diện rủi ro tiềm ẩn của các dự án đang hoạt động
+ * 3. Tá»± Ä‘á»™ng nháº­n diá»‡n rá»§i ro tiá»m áº©n cá»§a cÃ¡c dá»± Ã¡n Ä‘ang hoáº¡t Ä‘á»™ng
  */
 export const detectRisks = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const user = req.user;
     if (!user) {
-      res.status(200).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      res.status(200).json({ success: false, message: 'ChÆ°a xÃ¡c thá»±c ngÆ°á»i dÃ¹ng.' });
       return;
     }
 
@@ -328,7 +330,7 @@ export const detectRisks = async (req: AuthenticatedRequest, res: Response): Pro
     };
 
     if (user.role === 'ADMIN') {
-      // ADMIN xem toàn bộ
+      // ADMIN xem toÃ n bá»™
     } else if (user.role === 'MANAGER') {
       whereClause.OR = [
         user.departmentId ? { departmentId: user.departmentId } : undefined,
@@ -359,7 +361,7 @@ export const detectRisks = async (req: AuthenticatedRequest, res: Response): Pro
     if (activeProjects.length === 0) {
       res.status(200).json({
         success: true,
-        message: 'Hiện không có dự án đang hoạt động nào cần kiểm tra.',
+        message: 'Hiá»‡n khÃ´ng cÃ³ dá»± Ã¡n Ä‘ang hoáº¡t Ä‘á»™ng nÃ o cáº§n kiá»ƒm tra.',
         data: [],
       });
       return;
@@ -377,7 +379,7 @@ export const detectRisks = async (req: AuthenticatedRequest, res: Response): Pro
 
       return {
         projectId: p.id,
-        projectName: p.name || 'Dự án chưa đặt tên',
+        projectName: p.name || 'Dá»± Ã¡n chÆ°a Ä‘áº·t tÃªn',
         status: p.status || 'PLANNING',
         totalTasks,
         completedTasks,
@@ -396,44 +398,44 @@ export const detectRisks = async (req: AuthenticatedRequest, res: Response): Pro
         ? r.recommendations.join('. ')
         : typeof r.recommendation === 'string'
         ? r.recommendation
-        : 'Theo dõi sát sao các mốc giao hàng và đôn đốc các công việc trọng yếu.';
+        : 'Theo dÃµi sÃ¡t sao cÃ¡c má»‘c giao hÃ ng vÃ  Ä‘Ã´n Ä‘á»‘c cÃ¡c cÃ´ng viá»‡c trá»ng yáº¿u.';
 
       const factors = Array.isArray(r.riskFactors) && r.riskFactors.length > 0
         ? r.riskFactors
         : typeof r.description === 'string'
         ? [r.description]
-        : ['Tiến độ ổn định.'];
+        : ['Tiáº¿n Ä‘á»™ á»•n Ä‘á»‹nh.'];
 
       return {
         projectId: r.projectId || '',
-        projectName: r.projectName || 'Dự án',
-        title: r.title || (r.projectName ? `Rủi ro: ${r.projectName}` : 'Cảnh báo rủi ro dự án'),
+        projectName: r.projectName || 'Dá»± Ã¡n',
+        title: r.title || (r.projectName ? `Rá»§i ro: ${r.projectName}` : 'Cáº£nh bÃ¡o rá»§i ro dá»± Ã¡n'),
         riskLevel: r.riskLevel || 'LOW',
         recommendation: rec,
         recommendations: Array.isArray(r.recommendations) ? r.recommendations : [rec],
         riskFactors: factors,
-        description: factors.join(' • '),
+        description: factors.join(' â€¢ '),
         overallScore: typeof r.overallScore === 'number' ? r.overallScore : 85,
       };
     });
 
     res.status(200).json({
       success: true,
-      message: 'Phân tích rủi ro dự án hoàn tất.',
+      message: 'PhÃ¢n tÃ­ch rá»§i ro dá»± Ã¡n hoÃ n táº¥t.',
       data: normalizedRisks,
     });
   } catch (error: any) {
-    console.error('[AI][detectRisks] Lỗi:', error);
+    console.error('[AI][detectRisks] Lá»—i:', error);
     res.status(200).json({
       success: false,
-      message: 'Trợ lý AI đang trong chế độ dự phòng. Dữ liệu rủi ro được cập nhật từ hệ thống quy chuẩn.',
+      message: 'Trá»£ lÃ½ AI Ä‘ang trong cháº¿ Ä‘á»™ dá»± phÃ²ng. Dá»¯ liá»‡u rá»§i ro Ä‘Æ°á»£c cáº­p nháº­t tá»« há»‡ thá»‘ng quy chuáº©n.',
       data: [],
     });
   }
 };
 
 /**
- * 4. Tìm kiếm công việc bằng ngôn ngữ tự nhiên (Natural Language Search)
+ * 4. TÃ¬m kiáº¿m cÃ´ng viá»‡c báº±ng ngÃ´n ngá»¯ tá»± nhiÃªn (Natural Language Search)
  */
 export const searchTasksNL = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
@@ -442,7 +444,7 @@ export const searchTasksNL = async (req: AuthenticatedRequest, res: Response): P
     if (!query || !query.trim()) {
       res.status(200).json({
         success: false,
-        message: 'Vui lòng cung cấp nội dung tìm kiếm tự nhiên.',
+        message: 'Vui lÃ²ng cung cáº¥p ná»™i dung tÃ¬m kiáº¿m tá»± nhiÃªn.',
       });
       return;
     }
@@ -508,22 +510,22 @@ export const searchTasksNL = async (req: AuthenticatedRequest, res: Response): P
       data: tasks,
     });
   } catch (error: any) {
-    console.error('[AI][searchTasksNL] Lỗi:', error);
+    console.error('[AI][searchTasksNL] Lá»—i:', error);
     res.status(200).json({
       success: false,
-      message: 'Trợ lý AI hiện chưa thể tìm kiếm, vui lòng thử lại sau.',
+      message: 'Trá»£ lÃ½ AI hiá»‡n chÆ°a thá»ƒ tÃ¬m kiáº¿m, vui lÃ²ng thá»­ láº¡i sau.',
     });
   }
 };
 
 /**
- * 5. Trò chuyện và hỏi đáp dữ liệu dự án thời gian thực (Live Data-Aware Chat Assistant)
+ * 5. TrÃ² chuyá»‡n vÃ  há»i Ä‘Ã¡p dá»¯ liá»‡u dá»± Ã¡n thá»i gian thá»±c (Live Data-Aware Chat Assistant)
  */
 export const chatWithLiveData = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const user = req.user;
     if (!user) {
-      res.status(401).json({ success: false, message: 'Chưa xác thực người dùng.' });
+      res.status(401).json({ success: false, message: 'ChÆ°a xÃ¡c thá»±c ngÆ°á»i dÃ¹ng.' });
       return;
     }
 
@@ -531,11 +533,11 @@ export const chatWithLiveData = async (req: AuthenticatedRequest, res: Response)
     const userQuery = (query || message || '').trim();
 
     if (!userQuery) {
-      res.status(400).json({ success: false, message: 'Vui lòng cung cấp nội dung câu hỏi.' });
+      res.status(400).json({ success: false, message: 'Vui lÃ²ng cung cáº¥p ná»™i dung cÃ¢u há»i.' });
       return;
     }
 
-    // 1. Phân quyền và truy vấn toàn bộ dữ liệu dự án thời gian thực mà user có quyền truy cập
+    // 1. PhÃ¢n quyá»n vÃ  truy váº¥n toÃ n bá»™ dá»¯ liá»‡u dá»± Ã¡n thá»i gian thá»±c mÃ  user cÃ³ quyá»n truy cáº­p
     let projectWhere: any = {};
     if (user.role !== 'ADMIN') {
       const orConditions: any[] = [
@@ -568,8 +570,12 @@ export const chatWithLiveData = async (req: AuthenticatedRequest, res: Response)
       },
     });
 
-    // 2. Gom toàn bộ tasks và tính toán chỉ số thống kê
+    // 2. Gom toÃ n bá»™ tasks vÃ  tÃ­nh toÃ¡n chá»‰ sá»‘ thá»‘ng kÃª
+    // 2. Cung cap Ngu canh Thoi gian thuc (Real-time Clock Context)
     const now = new Date();
+    const formattedTime = now.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const formattedDate = now.toLocaleDateString('vi-VN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const fullDateTimeStr = `${formattedTime} - ${formattedDate}`;
     const allTasksMap = new Map<string, any>();
 
     projects.forEach((proj) => {
@@ -583,7 +589,7 @@ export const chatWithLiveData = async (req: AuthenticatedRequest, res: Response)
           priority: t.priority,
           dueDate: dueDate ? dueDate.toISOString() : null,
           isOverdue,
-          assigneeName: t.assignee?.name || 'Chưa giao',
+          assigneeName: t.assignee?.name || 'ChÆ°a giao',
           assigneeId: t.assigneeId,
           projectId: proj.id,
           projectName: proj.name,
@@ -606,7 +612,7 @@ export const chatWithLiveData = async (req: AuthenticatedRequest, res: Response)
     const liveContext: LiveDataContext = {
       user: {
         id: user.id,
-        name: user.name || 'Người dùng',
+        name: user.name || 'NgÆ°á»i dÃ¹ng',
         email: user.email || '',
         role: user.role,
       },
@@ -636,9 +642,15 @@ export const chatWithLiveData = async (req: AuthenticatedRequest, res: Response)
         };
       }),
       tasks: allTasks,
+      currentTime: {
+        formattedTime,
+        formattedDate,
+        fullDateTimeStr,
+        iso: now.toISOString(),
+      },
     };
 
-    // 3. Gửi câu hỏi và dữ liệu live sang Gemini AI (hoặc Smart Intent Fallback nếu không có kết nối)
+    // 3. Gá»­i cÃ¢u há»i vÃ  dá»¯ liá»‡u live sang Gemini AI (hoáº·c Smart Intent Fallback náº¿u khÃ´ng cÃ³ káº¿t ná»‘i)
     const answer = await askGeminiWithLiveData(userQuery, liveContext, history);
 
     res.status(200).json({
@@ -649,10 +661,183 @@ export const chatWithLiveData = async (req: AuthenticatedRequest, res: Response)
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    console.error('[AI][chatWithLiveData] Lỗi:', error);
+    console.error('[AI][chatWithLiveData] Lá»—i:', error);
     res.status(500).json({
       success: false,
-      message: 'Lỗi máy chủ khi xử lý câu hỏi với dữ liệu live.',
+      message: 'Lá»—i mÃ¡y chá»§ khi xá»­ lÃ½ cÃ¢u há»i vá»›i dá»¯ liá»‡u live.',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 6. Xá»­ lÃ½ kháº©u lá»‡nh giá»ng nÃ³i tiáº¿ng Viá»‡t Ä‘a Ã½ Ä‘á»‹nh (Multi-Intent Voice Engine)
+ * Há»— trá»£: COMPLETE_TASK, UNCOMPLETE_TASK, CREATE_TASK, QUERY_SCHEDULE, NAVIGATE
+ */
+export const handleVoiceCommand = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, message: 'ChÆ°a xÃ¡c thá»±c ngÆ°á»i dÃ¹ng.' });
+      return;
+    }
+
+    const { transcript, text, currentDate, tasks: clientTasks } = req.body;
+    const spokenText = (transcript || text || '').trim();
+
+    if (!spokenText) {
+      res.status(400).json({ success: false, message: 'Ná»™i dung kháº©u lá»‡nh giá»ng nÃ³i khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng.' });
+      return;
+    }
+
+    // 1. Thu tháº­p danh sÃ¡ch tasks cá»§a ngÆ°á»i dÃ¹ng (tá»« client hoáº·c tá»« DB)
+    let userTasks: VoiceCommandUserTask[] = [];
+    if (Array.isArray(clientTasks) && clientTasks.length > 0) {
+      userTasks = clientTasks.map((t: any) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        dueDate: t.dueDate || t.deadline || null,
+        projectName: t.projectName || t.project?.name,
+      }));
+    } else {
+      const dbTasks = await prisma.task.findMany({
+        where: {
+          OR: [
+            { assigneeId: userId },
+            { createdById: userId },
+            { project: { members: { some: { userId } } } },
+          ],
+        },
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          dueDate: true,
+          project: { select: { name: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 60,
+      });
+
+      userTasks = dbTasks.map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        dueDate: t.dueDate ? t.dueDate.toISOString() : null,
+        projectName: t.project?.name,
+      }));
+    }
+
+    // 2. PhÃ¢n tÃ­ch Ã½ Ä‘á»‹nh báº±ng Gemini NLU
+    const voiceResult = await processMultiIntentVoiceCommand({
+      transcript: spokenText,
+      userId,
+      currentDate: currentDate || new Date(),
+      userTasks,
+    });
+
+    const io = req.app.get('io');
+
+    // 3. Thá»±c thi hÃ nh Ä‘á»™ng cho cÃ¡c intent cáº­p nháº­t tráº¡ng thÃ¡i náº¿u tÃ¬m tháº¥y task
+    if (voiceResult.intent === 'COMPLETE_TASK' && voiceResult.data.targetTaskId) {
+      const targetId = voiceResult.data.targetTaskId;
+      const existing = await prisma.task.findUnique({
+        where: { id: targetId },
+        include: { project: true },
+      });
+
+      if (existing) {
+        const updatedTask = await prisma.task.update({
+          where: { id: targetId },
+          data: {
+            status: 'DONE',
+            completedAt: new Date(),
+          },
+          include: {
+            assignee: { select: { id: true, name: true, avatar: true } },
+            project: { select: { id: true, name: true } },
+          },
+        });
+
+        if (io) {
+          io.to(`project:${existing.projectId}`).emit('task:status_changed', {
+            taskId: targetId,
+            projectId: existing.projectId,
+            oldStatus: existing.status,
+            newStatus: 'DONE',
+            task: updatedTask,
+          });
+          io.to(`user:${userId}`).emit('task:status_changed', {
+            taskId: targetId,
+            newStatus: 'DONE',
+            task: updatedTask,
+          });
+          io.to(`user:${userId}`).emit('task:completed', {
+            taskId: targetId,
+            title: updatedTask.title,
+          });
+          io.emit('calendar:refresh', { taskId: targetId, status: 'DONE' });
+        }
+
+        voiceResult.actionMessage = `âœ“ ÄÃ£ Ä‘Ã¡nh dáº¥u hoÃ n thÃ nh: "${updatedTask.title}"`;
+        voiceResult.speechFeedback = `ÄÃ£ Ä‘Ã¡nh dáº¥u hoÃ n thÃ nh cÃ´ng viá»‡c ${updatedTask.title}.`;
+        (voiceResult.data as any).task = updatedTask;
+      }
+    } else if (voiceResult.intent === 'UNCOMPLETE_TASK' && voiceResult.data.targetTaskId) {
+      const targetId = voiceResult.data.targetTaskId;
+      const existing = await prisma.task.findUnique({
+        where: { id: targetId },
+        include: { project: true },
+      });
+
+      if (existing) {
+        const updatedTask = await prisma.task.update({
+          where: { id: targetId },
+          data: {
+            status: 'IN_PROGRESS',
+            completedAt: null,
+          },
+          include: {
+            assignee: { select: { id: true, name: true, avatar: true } },
+            project: { select: { id: true, name: true } },
+          },
+        });
+
+        if (io) {
+          io.to(`project:${existing.projectId}`).emit('task:status_changed', {
+            taskId: targetId,
+            projectId: existing.projectId,
+            oldStatus: existing.status,
+            newStatus: 'IN_PROGRESS',
+            task: updatedTask,
+          });
+          io.to(`user:${userId}`).emit('task:status_changed', {
+            taskId: targetId,
+            newStatus: 'IN_PROGRESS',
+            task: updatedTask,
+          });
+          io.emit('calendar:refresh', { taskId: targetId, status: 'IN_PROGRESS' });
+        }
+
+        voiceResult.actionMessage = `ÄÃ£ chuyá»ƒn vá» chÆ°a hoÃ n thÃ nh: "${updatedTask.title}"`;
+        voiceResult.speechFeedback = `ÄÃ£ chuyá»ƒn cÃ´ng viá»‡c ${updatedTask.title} vá» tráº¡ng thÃ¡i chÆ°a hoÃ n thÃ nh.`;
+        (voiceResult.data as any).task = updatedTask;
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      intent: voiceResult.intent,
+      actionMessage: voiceResult.actionMessage,
+      speechFeedback: voiceResult.speechFeedback,
+      data: voiceResult.data,
+    });
+  } catch (error: any) {
+    console.error('[AI][handleVoiceCommand] Lá»—i:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Lá»—i mÃ¡y chá»§ khi xá»­ lÃ½ kháº©u lá»‡nh giá»ng nÃ³i.',
       error: error.message,
     });
   }

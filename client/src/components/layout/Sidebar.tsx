@@ -13,6 +13,7 @@ import {
   ChevronRight,
   Flame,
   Calendar,
+  ClipboardCheck,
 } from 'lucide-react';
 import { apiClient } from '../../api/apiClient';
 import Avatar from '../ui/Avatar';
@@ -82,6 +83,12 @@ const navItems: NavItem[] = [
     path: '/kpi',
     icon: BarChart3,
     badgeType: 'kpi',
+  },
+  {
+    id: 'approvals',
+    label: 'Phê Duyệt & Đề Xuất',
+    path: '/approvals',
+    icon: ClipboardCheck,
   },
   {
     id: 'ai-assistant',

@@ -7,6 +7,7 @@ import {
   detectRisks,
   searchTasksNL,
   chatWithLiveData,
+  handleVoiceCommand,
 } from '../controllers/aiController';
 import { authenticateToken } from '../middlewares/authMiddleware';
 
@@ -36,5 +37,8 @@ router.get('/department-risk', detectRisks);
 
 // 5. Tìm kiếm tác vụ thông minh bằng ngôn ngữ tự nhiên
 router.post('/search', searchTasksNL);
+
+// 6. Huấn luyện Gemini AI Voice đa ý định tiếng Việt tự nhiên
+router.post('/voice-command', handleVoiceCommand);
 
 export default router;

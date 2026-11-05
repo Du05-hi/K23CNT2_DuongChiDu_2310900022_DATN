@@ -1,3 +1,4 @@
+import { syncAllProjectsStatus } from './utils/projectStatusSync';
 import express from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
@@ -27,8 +28,22 @@ configureGoogleAuth();
 
 // Middlewares
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+const allowedOrigins = [
+  process.env.CLIENT_URL || 'http://localhost:5173',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+];
+
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true);
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -61,6 +76,7 @@ httpServer.listen(PORT, async () => {
     await prisma.$connect();
     console.log('✅ Database connected successfully');
     await cleanupPersonalProjects().catch((err) => console.warn('Lỗi cleanup projects rác:', err));
+    await syncAllProjectsStatus().catch((err) => console.warn('Lỗi auto-sync project status:', err));
     const address = httpServer.address();
     const port = typeof address === 'object' && address ? address.port : PORT;
     console.log(`Server running at http://localhost:${port}`);

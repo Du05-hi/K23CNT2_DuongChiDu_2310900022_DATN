@@ -55,6 +55,7 @@ router.put('/:id', updateTask);
 router.patch('/:id/deadline', updateTaskDeadline);
 router.put('/:id/deadline', updateTaskDeadline);
 router.put('/:id/status', updateTaskStatus);
+router.patch('/:id/status', updateTaskStatus);
 router.delete('/:id', deleteTask);
 
 // 3. Quy trình Review & QA nghiệm thu công việc
